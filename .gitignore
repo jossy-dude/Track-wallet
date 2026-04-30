@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.turbo/
+.DS_Store
+coverage/
+*.log
+apps/mobile/android/
+apps/mobile/.capacitor/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
