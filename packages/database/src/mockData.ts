@@ -283,6 +283,8 @@ export function buildBudgetSummaries(
     "housing",
     "food",
     "transport",
+    "entertainment",
+    "misc",
   ];
 
   return trackedCategories.map((category) => {

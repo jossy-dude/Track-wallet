@@ -10,6 +10,7 @@ export interface InboxPanelProps {
   onEditTransaction?: (transaction: InboxTransactionPreview) => void;
   onApproveTransaction?: (transaction: InboxTransactionPreview) => void;
   seeAllLabel?: string;
+  showSeeAll?: boolean;
   className?: string;
 }
 
@@ -21,6 +22,7 @@ export function InboxPanel({
   onEditTransaction,
   onApproveTransaction,
   seeAllLabel = "See All",
+  showSeeAll = true,
   className
 }: InboxPanelProps) {
   return (
@@ -29,13 +31,15 @@ export function InboxPanel({
         <h3 className="font-headline text-lg font-semibold text-on-surface">
           {title} ({pendingCount} Pending)
         </h3>
-        <button
-          className="min-h-10 px-2 text-sm font-semibold text-primary active:scale-95"
-          onClick={onSeeAll}
-          type="button"
-        >
-          {seeAllLabel}
-        </button>
+        {showSeeAll ? (
+          <button
+            className="min-h-10 px-2 text-sm font-semibold text-primary active:scale-95"
+            onClick={onSeeAll}
+            type="button"
+          >
+            {seeAllLabel}
+          </button>
+        ) : null}
       </div>
 
       <div className="flex min-h-24 flex-col gap-1 rounded-[24px] border border-surface-container bg-surface-container-lowest p-2 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">

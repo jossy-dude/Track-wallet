@@ -131,6 +131,131 @@ describe("parseSmsMessage", () => {
     expect(result.draft.parserTemplateId).toBe("telebirr_credit_v2");
   });
 
+  it("parses a CBE transfer with explicit service fees", () => {
+    const rawSmsMessage: RawSmsMessage = {
+      messageId: "sms-cbe-transfer-001",
+      senderLabel: "CBE",
+      smsBody:
+        "You have transferred ETB 300.00 to MINT CAFE on 2026-04-30. service charge of ETB 5.00 VAT(15%) of ETB 0.75 Current balance is ETB 8,144.25 Ref No ABC123",
+      receivedAt: "2026-04-30T12:00:00.000Z",
+    };
+
+    const result = parseSmsMessage(rawSmsMessage);
+
+    expect(result.status).toBe("matched");
+    if (result.status !== "matched") {
+      throw new Error("Expected parser to match the CBE transfer message");
+    }
+
+    expect(result.draft.transactionDirection).toBe("transfer");
+    expect(result.draft.amountMinor).toBe(30000);
+    expect(result.draft.feeMinor).toBe(575);
+    expect(result.draft.runningBalanceMinor).toBe(814425);
+    expect(result.draft.title).toBe("Mint Cafe");
+    expect(result.draft.reference).toBe("ABC123");
+    expect(result.draft.parserTemplateId).toBe("cbe_transfer_with_fees_v1");
+  });
+
+  it("parses a Telebirr merchant payment with service fee and vat", () => {
+    const rawSmsMessage: RawSmsMessage = {
+      messageId: "sms-telebirr-debit-001",
+      senderLabel: "127",
+      smsBody:
+        "You have paid ETB 120.00 goods purchased from STREAMING SERVICE on 30/04/2026. current balance is ETB 1,677.70. service fee is ETB 2.00. VAT on the service fee is ETB 0.30.",
+      receivedAt: "2026-04-30T12:05:00.000Z",
+    };
+
+    const result = parseSmsMessage(rawSmsMessage);
+
+    expect(result.status).toBe("matched");
+    if (result.status !== "matched") {
+      throw new Error("Expected parser to match the Telebirr payment message");
+    }
+
+    expect(result.draft.financialInstitution).toBe("telebirr");
+    expect(result.draft.transactionDirection).toBe("debit");
+    expect(result.draft.amountMinor).toBe(12000);
+    expect(result.draft.feeMinor).toBe(230);
+    expect(result.draft.runningBalanceMinor).toBe(167770);
+    expect(result.draft.title).toBe("Streaming Service");
+    expect(result.draft.category).toBe("entertainment");
+    expect(result.draft.parserTemplateId).toBe("telebirr_paid_goods_v1");
+  });
+
+  it("parses a BOA debit alert with available balance and info text", () => {
+    const rawSmsMessage: RawSmsMessage = {
+      messageId: "sms-boa-debit-001",
+      senderLabel: "BOA",
+      smsBody:
+        "Your account was debited with ETB 850.00. Info: RENT PAYMENT. Avail. Bal: ETB 4,150.00",
+      receivedAt: "2026-04-30T12:10:00.000Z",
+    };
+
+    const result = parseSmsMessage(rawSmsMessage);
+
+    expect(result.status).toBe("matched");
+    if (result.status !== "matched") {
+      throw new Error("Expected parser to match the BOA debit message");
+    }
+
+    expect(result.draft.financialInstitution).toBe("boa");
+    expect(result.draft.transactionDirection).toBe("debit");
+    expect(result.draft.amountMinor).toBe(85000);
+    expect(result.draft.runningBalanceMinor).toBe(415000);
+    expect(result.draft.title).toBe("Rent Payment");
+    expect(result.draft.category).toBe("housing");
+    expect(result.draft.parserTemplateId).toBe("boa_debit_v1");
+  });
+
+  it("parses a CBEBirr withdrawal with charge and tax", () => {
+    const rawSmsMessage: RawSmsMessage = {
+      messageId: "sms-cbebirr-debit-001",
+      senderLabel: "CBEBirr",
+      smsBody:
+        "You have withdrawn 500.00Br from CBE ATM. charge 5.00Br tax 0.75Br. balance is 1,244.25Br",
+      receivedAt: "2026-04-30T12:15:00.000Z",
+    };
+
+    const result = parseSmsMessage(rawSmsMessage);
+
+    expect(result.status).toBe("matched");
+    if (result.status !== "matched") {
+      throw new Error("Expected parser to match the CBEBirr withdrawal message");
+    }
+
+    expect(result.draft.financialInstitution).toBe("cbebirr");
+    expect(result.draft.transactionDirection).toBe("debit");
+    expect(result.draft.amountMinor).toBe(50000);
+    expect(result.draft.feeMinor).toBe(575);
+    expect(result.draft.runningBalanceMinor).toBe(124425);
+    expect(result.draft.title).toBe("ATM Withdrawal");
+    expect(result.draft.parserTemplateId).toBe("cbebirr_withdrawal_v1");
+  });
+
+  it("parses a Bunna withdrawal alert", () => {
+    const rawSmsMessage: RawSmsMessage = {
+      messageId: "sms-bunna-debit-001",
+      senderLabel: "BunnaBank",
+      smsBody:
+        "A withdrawal of 275.00 ETB has been made by ATM CASHOUT, your current balance is 2,025.00 ETB",
+      receivedAt: "2026-04-30T12:20:00.000Z",
+    };
+
+    const result = parseSmsMessage(rawSmsMessage);
+
+    expect(result.status).toBe("matched");
+    if (result.status !== "matched") {
+      throw new Error("Expected parser to match the Bunna withdrawal message");
+    }
+
+    expect(result.draft.financialInstitution).toBe("bunna");
+    expect(result.draft.transactionDirection).toBe("debit");
+    expect(result.draft.amountMinor).toBe(27500);
+    expect(result.draft.runningBalanceMinor).toBe(202500);
+    expect(result.draft.title).toBe("Atm Cashout");
+    expect(result.draft.parserTemplateId).toBe("bunna_withdrawal_v1");
+  });
+
   it("normalizes sender casing and collapses irregular whitespace before matching", () => {
     const rawSmsMessage: RawSmsMessage = {
       messageId: "sms-cbe-debit-003",
@@ -151,6 +276,30 @@ describe("parseSmsMessage", () => {
     expect(result.draft.transactionDirection).toBe("debit");
     expect(result.draft.amountMinor).toBe(45000);
     expect(result.draft.parserTemplateId).toBe("cbe_debit_v1");
+  });
+
+  it("falls back to a generic deterministic parse for unknown transactional senders", () => {
+    const rawSmsMessage: RawSmsMessage = {
+      messageId: "sms-generic-credit-001",
+      senderLabel: "MYSTERYBANK",
+      smsBody:
+        "Your wallet has been credited with ETB 95.00 from COFFEE SHOP on 2026-04-30. current balance is ETB 1,205.00",
+      receivedAt: "2026-04-30T12:25:00.000Z",
+    };
+
+    const result = parseSmsMessage(rawSmsMessage);
+
+    expect(result.status).toBe("matched");
+    if (result.status !== "matched") {
+      throw new Error("Expected parser to fall back to a generic credit parse");
+    }
+
+    expect(result.draft.financialInstitution).toBe("unknown");
+    expect(result.draft.transactionDirection).toBe("credit");
+    expect(result.draft.amountMinor).toBe(9500);
+    expect(result.draft.runningBalanceMinor).toBe(120500);
+    expect(result.draft.title).toBe("Coffee Shop");
+    expect(result.draft.parserTemplateId).toBe("generic_credit_v1");
   });
 
   it("returns an unmatched result when no starter template applies", () => {

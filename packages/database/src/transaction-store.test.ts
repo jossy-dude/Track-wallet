@@ -19,7 +19,7 @@ describe("createTransactionStore", () => {
     expect(state.approvalQueue).toHaveLength(3);
     expect(state.approvedTransactions).toHaveLength(3);
     expect(state.accountSummaries).toHaveLength(4);
-    expect(state.budgetSummaries).toHaveLength(3);
+    expect(state.budgetSummaries).toHaveLength(5);
     expect(dashboardSnapshot.totalBalanceMinor).toBe(1425000);
     expect(dashboardSnapshot.pendingApprovalCount).toBe(3);
     expect(dashboardSnapshot.approvedTransactionCount).toBe(3);
@@ -58,7 +58,41 @@ describe("createTransactionStore", () => {
     expect(state.approvalQueue[0]?.queuedAt).toBe("2026-04-30T09:10:30.000Z");
   });
 
-  it("updates or creates account summaries from queued SMS running balances", () => {
+  it("captures unmatched SMS into a raw review lane without polluting the approval queue", () => {
+    const rawSmsMessage: RawSmsMessage = {
+      messageId: "sms-unknown-raw-001",
+      senderLabel: "Unknown Sender",
+      smsBody: "Lunch tomorrow at 1pm?",
+      receivedAt: "2026-04-30T13:30:00.000Z",
+    };
+
+    const parseResult = parseSmsMessage(rawSmsMessage);
+    if (parseResult.status !== "unmatched") {
+      throw new Error("Expected parser to leave this message unmatched");
+    }
+
+    const transactionStore = createTransactionStore();
+    const unmatchedEntry = transactionStore
+      .getState()
+      .captureUnmatchedSms(rawSmsMessage, parseResult, "2026-04-30T13:30:30.000Z");
+
+    const state = transactionStore.getState();
+
+    expect(state.approvalQueue).toHaveLength(0);
+    expect(state.unmatchedMessages).toHaveLength(1);
+    expect(state.unmatchedMessages[0]?.unmatchedEntryId).toBe(
+      unmatchedEntry.unmatchedEntryId,
+    );
+    expect(state.unmatchedMessages[0]).toMatchObject({
+      rawMessageId: "sms-unknown-raw-001",
+      senderLabel: "Unknown Sender",
+      smsBody: "Lunch tomorrow at 1pm?",
+      failureReason: "no_template_match",
+      capturedAt: "2026-04-30T13:30:30.000Z",
+    });
+  });
+
+  it("updates or creates account summaries only after approval", () => {
     const rawSmsMessage: RawSmsMessage = {
       messageId: "sms-telebirr-credit-queue-001",
       senderLabel: "127",
@@ -74,9 +108,15 @@ describe("createTransactionStore", () => {
 
     const transactionStore = createTransactionStore();
 
-    transactionStore
+    const queueEntry = transactionStore
       .getState()
       .queueParsedTransaction(parseResult.draft, "2026-04-30T11:05:30.000Z");
+
+    expect(transactionStore.getState().accountSummaries).toHaveLength(0);
+
+    transactionStore
+      .getState()
+      .approveQueueItem(queueEntry.queueEntryId, "2026-04-30T11:06:00.000Z");
 
     const state = transactionStore.getState();
 
@@ -132,6 +172,22 @@ describe("createTransactionStore", () => {
     const transactionStore = createTransactionStore();
 
     transactionStore.getState().seedDemoData();
+    transactionStore.getState().captureUnmatchedSms(
+      {
+        messageId: "sms-unknown-raw-002",
+        senderLabel: "Unknown Sender",
+        smsBody: "Lunch tomorrow at 1pm?",
+        receivedAt: "2026-04-30T13:35:00.000Z",
+      },
+      {
+        status: "unmatched",
+        failureReason: "no_template_match",
+        rawMessageId: "sms-unknown-raw-002",
+        senderLabel: "Unknown Sender",
+        smsBody: "Lunch tomorrow at 1pm?",
+      },
+      "2026-04-30T13:35:30.000Z",
+    );
     transactionStore.getState().clearAllData();
 
     const state = transactionStore.getState();
@@ -142,6 +198,7 @@ describe("createTransactionStore", () => {
     expect(state.approvedTransactions).toHaveLength(0);
     expect(state.accountSummaries).toHaveLength(0);
     expect(state.budgetSummaries).toHaveLength(0);
+    expect(state.unmatchedMessages).toHaveLength(0);
     expect(state.activeQueueEntryId).toBeNull();
     expect(dashboardSnapshot.totalBalanceMinor).toBe(0);
     expect(dashboardSnapshot.pendingApprovalCount).toBe(0);

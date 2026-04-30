@@ -4,8 +4,11 @@ import type {
   ApprovedTransaction,
   DashboardSnapshot,
   FinancialInstitution,
+  ParserMatchResult,
   ParsedTransactionDraft,
+  RawSmsMessage,
   BudgetSummary,
+  UnmatchedSmsEntry,
   UiTone,
 } from "@omni-sync/core";
 import { FINANCIAL_INSTITUTION_LABELS } from "@omni-sync/core";
@@ -24,6 +27,7 @@ export interface TransactionStoreState {
   hasInitialized: boolean;
   approvalQueue: ApprovalQueueItem[];
   approvedTransactions: ApprovedTransaction[];
+  unmatchedMessages: UnmatchedSmsEntry[];
   accountSummaries: AccountSummary[];
   budgetSummaries: BudgetSummary[];
   activeQueueEntryId: string | null;
@@ -32,6 +36,11 @@ export interface TransactionStoreState {
     draft: ParsedTransactionDraft,
     queuedAt?: string,
   ) => ApprovalQueueItem;
+  captureUnmatchedSms: (
+    rawSmsMessage: RawSmsMessage,
+    unmatchedResult: Extract<ParserMatchResult, { status: "unmatched" }>,
+    capturedAt?: string,
+  ) => UnmatchedSmsEntry;
   openTransactionEditor: (queueEntryId: string) => void;
   closeTransactionEditor: () => void;
   editApprovalQueueItem: (
@@ -43,6 +52,7 @@ export interface TransactionStoreState {
     approvedAt?: string,
   ) => ApprovedTransaction | null;
   rejectQueueItem: (queueEntryId: string) => void;
+  dismissUnmatchedSms: (unmatchedEntryId: string) => void;
   clearAllData: () => void;
 }
 
@@ -87,6 +97,7 @@ function createInitialState() {
     hasInitialized: false,
     approvalQueue: [] as ApprovalQueueItem[],
     approvedTransactions: [] as ApprovedTransaction[],
+    unmatchedMessages: [] as UnmatchedSmsEntry[],
     accountSummaries: [] as AccountSummary[],
     budgetSummaries: [] as BudgetSummary[],
     activeQueueEntryId: null as string | null,
@@ -218,6 +229,7 @@ export function createTransactionStore(): TransactionStoreApi {
             hasInitialized: true,
             approvalQueue: cloneApprovalQueue(),
             approvedTransactions,
+            unmatchedMessages: [],
             accountSummaries: cloneAccountSummaries(),
             budgetSummaries: buildBudgetSummaries(approvedTransactions),
             activeQueueEntryId: null,
@@ -235,13 +247,31 @@ export function createTransactionStore(): TransactionStoreApi {
           set((state) => ({
             hasInitialized: true,
             approvalQueue: [queuedDraft, ...state.approvalQueue],
-            accountSummaries: syncAccountSummariesWithDraft(
-              state.accountSummaries,
-              draft,
-            ),
           }));
 
           return queuedDraft;
+        },
+        captureUnmatchedSms: (
+          rawSmsMessage,
+          unmatchedResult,
+          capturedAt = new Date().toISOString(),
+        ) => {
+          const unmatchedEntry: UnmatchedSmsEntry = {
+            unmatchedEntryId: `unmatched-${rawSmsMessage.messageId}-${capturedAt}`,
+            rawMessageId: unmatchedResult.rawMessageId,
+            senderLabel: unmatchedResult.senderLabel,
+            smsBody: unmatchedResult.smsBody,
+            receivedAt: rawSmsMessage.receivedAt,
+            capturedAt,
+            failureReason: unmatchedResult.failureReason,
+          };
+
+          set((state) => ({
+            hasInitialized: true,
+            unmatchedMessages: [unmatchedEntry, ...state.unmatchedMessages],
+          }));
+
+          return unmatchedEntry;
         },
         openTransactionEditor: (queueEntryId) => {
           set({ activeQueueEntryId: queueEntryId });
@@ -285,6 +315,10 @@ export function createTransactionStore(): TransactionStoreApi {
               (candidate) => candidate.queueEntryId !== queueEntryId,
             ),
             approvedTransactions,
+            accountSummaries: syncAccountSummariesWithDraft(
+              state.accountSummaries,
+              approvedTransaction,
+            ),
             budgetSummaries: buildBudgetSummaries(approvedTransactions),
             activeQueueEntryId: null,
           });
@@ -302,11 +336,19 @@ export function createTransactionStore(): TransactionStoreApi {
                 : state.activeQueueEntryId,
           }));
         },
+        dismissUnmatchedSms: (unmatchedEntryId) => {
+          set((state) => ({
+            unmatchedMessages: state.unmatchedMessages.filter(
+              (message) => message.unmatchedEntryId !== unmatchedEntryId,
+            ),
+          }));
+        },
         clearAllData: () => {
           set({
             hasInitialized: true,
             approvalQueue: [],
             approvedTransactions: [],
+            unmatchedMessages: [],
             accountSummaries: [],
             budgetSummaries: [],
             activeQueueEntryId: null,
@@ -320,6 +362,7 @@ export function createTransactionStore(): TransactionStoreApi {
           hasInitialized: state.hasInitialized,
           approvalQueue: state.approvalQueue,
           approvedTransactions: state.approvedTransactions,
+          unmatchedMessages: state.unmatchedMessages,
           accountSummaries: state.accountSummaries,
           budgetSummaries: state.budgetSummaries,
           activeQueueEntryId: state.activeQueueEntryId,

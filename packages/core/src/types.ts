@@ -87,6 +87,16 @@ export type ParserMatchResult =
       smsBody: string;
     };
 
+export interface UnmatchedSmsEntry {
+  unmatchedEntryId: string;
+  rawMessageId: string;
+  senderLabel: string;
+  smsBody: string;
+  receivedAt: string;
+  capturedAt: string;
+  failureReason: "no_template_match";
+}
+
 export interface ApprovalQueueItem extends ParsedTransactionDraft {
   queueEntryId: string;
   queuedAt: string;

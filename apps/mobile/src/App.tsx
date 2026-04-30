@@ -12,13 +12,8 @@ import {
   useTransactionStore,
 } from "@omni-sync/database";
 import {
-  AccountCarousel,
-  BalanceBreakdownGrid,
-  BalanceSummaryCard,
   BottomNavBar,
-  BudgetLimitCard,
   EditTransactionModal,
-  InboxPanel,
   MaterialSymbol,
   TopAppBar,
   type AccountSummaryCardData,
@@ -31,10 +26,14 @@ import {
   type TransactionCategoryOption,
 } from "@omni-sync/ui";
 
-import { ActivityFeed, type ActivityFeedItem } from "./components/ActivityFeed";
-import { MetricCard } from "./components/MetricCard";
+import { type ActivityFeedItem } from "./components/ActivityFeed";
 import { SettingsSheet } from "./components/SettingsSheet";
+import { type UnmatchedSmsPreview } from "./components/UnmatchedSmsPanel";
 import { useParser } from "./hooks/useParser";
+import { CardsScreen } from "./screens/CardsScreen";
+import { HomeScreen } from "./screens/HomeScreen";
+import { InboxScreen } from "./screens/InboxScreen";
+import { InsightsScreen } from "./screens/InsightsScreen";
 
 type MobileTab = "home" | "inbox" | "insights" | "cards";
 
@@ -186,6 +185,7 @@ export default function App() {
   const approvedTransactions = useTransactionStore(
     (state) => state.approvedTransactions,
   );
+  const unmatchedMessages = useTransactionStore((state) => state.unmatchedMessages);
   const accountSummaries = useTransactionStore((state) => state.accountSummaries);
   const budgetSummaries = useTransactionStore((state) => state.budgetSummaries);
   const activeQueueEntryId = useTransactionStore(
@@ -202,6 +202,9 @@ export default function App() {
     (state) => state.editApprovalQueueItem,
   );
   const approveQueueItem = useTransactionStore((state) => state.approveQueueItem);
+  const dismissUnmatchedSms = useTransactionStore(
+    (state) => state.dismissUnmatchedSms,
+  );
   const clearAllData = useTransactionStore((state) => state.clearAllData);
 
   useEffect(() => {
@@ -368,6 +371,28 @@ export default function App() {
     [activeQueueEntryId, approvalQueue],
   );
 
+  const sortedUnmatchedMessages = useMemo(
+    () =>
+      [...unmatchedMessages].sort(
+        (left, right) =>
+          new Date(right.capturedAt).getTime() -
+          new Date(left.capturedAt).getTime(),
+      ),
+    [unmatchedMessages],
+  );
+
+  const unmatchedMessagePreviews = useMemo<UnmatchedSmsPreview[]>(
+    () =>
+      sortedUnmatchedMessages.map((message) => ({
+        id: message.unmatchedEntryId,
+        senderLabel: message.senderLabel,
+        smsBody: message.smsBody,
+        receivedAtLabel: formatShortDateTime(message.receivedAt),
+        capturedAtLabel: formatShortDateTime(message.capturedAt),
+      })),
+    [sortedUnmatchedMessages],
+  );
+
   const pendingValueMinor = useMemo(
     () =>
       approvalQueue.reduce(
@@ -416,6 +441,14 @@ export default function App() {
   const pendingInstitutionsCount = useMemo(
     () => new Set(approvalQueue.map((item) => item.financialInstitution)).size,
     [approvalQueue],
+  );
+
+  const visibleChannelCount = useMemo(
+    () =>
+      Object.values(dashboardSnapshot.balanceByChannel).filter(
+        (balanceMinor) => balanceMinor > 0,
+      ).length,
+    [dashboardSnapshot.balanceByChannel],
   );
 
   const previewSummary = useMemo(() => {
@@ -486,10 +519,13 @@ export default function App() {
       timestamp_ms: Date.now(),
     });
 
-    if (result.status !== "queued") {
+    if (result.status === "unmatched_captured") {
+      setIsSettingsOpen(false);
+      setActiveTab("inbox");
       setDebugFeedback(
-        `No parser template matched the current ${debugSenderLabel} SMS body.`,
+        "No parser template matched. Saved the raw SMS into Needs Parser Review.",
       );
+      setRawInput("");
       return;
     }
 
@@ -516,336 +552,85 @@ export default function App() {
     setDebugFeedback("Restored the seeded demo data for the dashboard and inbox.");
   }
 
-  function renderHomeView() {
-    return (
-      <>
-        <section className="relative overflow-hidden rounded-[24px] bg-primary p-6 text-on-primary shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute -right-10 -top-10 h-32 w-32 rounded-full bg-white/10 blur-2xl"
+  function renderActiveTab() {
+    switch (activeTab) {
+      case "inbox":
+        return (
+          <InboxScreen
+            inboxTransactions={inboxTransactions}
+            onApproveTransaction={(transaction) => approveQueueItem(transaction.id)}
+            onDismissUnmatchedMessage={(message) =>
+              dismissUnmatchedSms(message.id)
+            }
+            onEditTransaction={(transaction) =>
+              openTransactionEditor(transaction.id)
+            }
+            onOpenSettings={() => setIsSettingsOpen(true)}
+            pendingCount={dashboardSnapshot.pendingApprovalCount}
+            pendingInstitutionCount={pendingInstitutionsCount}
+            pendingValueDisplay={formatCompactCurrencyMinor(pendingValueMinor)}
+            recentApprovedActivity={recentApprovedActivity}
+            unmatchedCount={unmatchedMessagePreviews.length}
+            unmatchedMessages={unmatchedMessagePreviews}
           />
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute -bottom-10 -left-10 h-32 w-32 rounded-full bg-white/10 blur-2xl"
+        );
+      case "insights":
+        return (
+          <InsightsScreen
+            budgetCards={budgetCards}
+            incomeDisplay={formatCompactCurrencyMinor(approvedIncomeMinor)}
+            netFlowDisplay={formatSignedCurrencyMinor(netFlowMinor)}
+            outflowDisplay={formatCompactCurrencyMinor(approvedExpenseMinor)}
+            recentApprovedActivity={recentApprovedActivity}
+            totalBalanceDisplay={formatCompactCurrencyMinor(
+              dashboardSnapshot.totalBalanceMinor,
+            )}
           />
-          <div className="relative z-10 flex flex-col gap-5">
-            <div className="flex items-start justify-between gap-4">
-              <div className="space-y-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-on-primary/80">
-                  Daily pulse
-                </p>
-                <h2 className="max-w-lg font-headline text-3xl font-semibold tracking-tight">
-                  Local inbox, clean ledger, one mobile finance surface.
-                </h2>
-                <p className="max-w-lg text-sm text-on-primary/85">
-                  {dashboardSnapshot.pendingApprovalCount > 0
-                    ? `${dashboardSnapshot.pendingApprovalCount} transactions are waiting for review before they reach your dashboard.`
-                    : "The approval loop is clear. New parsed SMS entries will land here first."}
-                </p>
-              </div>
-              <div className="rounded-full bg-white/10 p-3">
-                <MaterialSymbol className="text-[24px]" filled name="all_inbox" />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <MetricCard
-                hint="Ready for edit"
-                icon="mail"
-                label="Inbox"
-                tone="primary"
-                value={String(dashboardSnapshot.pendingApprovalCount)}
-              />
-              <MetricCard
-                hint="Approved entries"
-                icon="task_alt"
-                label="Ledger"
-                tone="secondary"
-                value={String(dashboardSnapshot.approvedTransactionCount)}
-              />
-              <MetricCard
-                hint="Waiting amount"
-                icon="schedule"
-                label="Pending value"
-                tone="tertiary"
-                value={formatCompactCurrencyMinor(pendingValueMinor)}
-              />
-              <MetricCard
-                hint="Live balances"
-                icon="account_balance_wallet"
-                label="Accounts"
-                tone="secondary"
-                value={String(accountSummaries.length)}
-              />
-            </div>
-          </div>
-        </section>
-
-        <BalanceSummaryCard
-          breakdown={<BalanceBreakdownGrid items={balanceBreakdownItems} />}
-          title="Total balance"
-          totalBalanceDisplay={formatCurrencyMinor(
-            dashboardSnapshot.totalBalanceMinor,
-          )}
-        />
-
-        <AccountCarousel
-          accounts={accountCards}
-          onAccountPress={() => activateTab("cards")}
-          title="Your Accounts"
-        />
-
-        <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
-          <BudgetLimitCard
-            categories={budgetCards}
-            periodLabel="This Month"
-            title="Budget Limit"
+        );
+      case "cards":
+        return (
+          <CardsScreen
+            accountActivity={accountActivity}
+            accountCards={accountCards}
+            accountCount={accountSummaries.length}
+            balanceBreakdownItems={balanceBreakdownItems}
+            topBalanceDisplay={
+              topInstitution
+                ? formatCompactCurrencyMinor(topInstitution.balanceMinor)
+                : "ETB 0"
+            }
+            topInstitutionHeadline={
+              topInstitution
+                ? `${topInstitution.institutionName} leads your balances`
+                : "No account balances yet"
+            }
+            totalBalanceDisplay={formatCurrencyMinor(
+              dashboardSnapshot.totalBalanceMinor,
+            )}
+            visibleChannelCount={visibleChannelCount}
           />
-
-          <InboxPanel
+        );
+      case "home":
+      default:
+        return (
+          <HomeScreen
+            accountCards={accountCards}
+            balanceBreakdownItems={balanceBreakdownItems}
+            budgetCards={budgetCards}
+            inboxTransactions={homeInboxTransactions}
             onApproveTransaction={(transaction) => approveQueueItem(transaction.id)}
             onEditTransaction={(transaction) =>
               openTransactionEditor(transaction.id)
             }
-            onSeeAll={() => activateTab("inbox")}
+            onOpenAccountView={() => activateTab("cards")}
+            onOpenInbox={() => activateTab("inbox")}
             pendingCount={dashboardSnapshot.pendingApprovalCount}
-            seeAllLabel="Open Inbox"
-            title="Inbox"
-            transactions={homeInboxTransactions}
+            recentApprovedActivity={recentApprovedActivity}
+            totalBalanceDisplay={formatCurrencyMinor(
+              dashboardSnapshot.totalBalanceMinor,
+            )}
           />
-        </div>
-
-        <ActivityFeed
-          description="The latest transactions already approved into the dashboard."
-          emptyLabel="No approved transactions yet. Approve an inbox item to start building the ledger."
-          items={recentApprovedActivity}
-          title="Recently Approved"
-        />
-      </>
-    );
-  }
-
-  function renderInboxView() {
-    return (
-      <>
-        <section className="rounded-[24px] bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
-          <div className="flex items-start justify-between gap-4">
-            <div className="space-y-2">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-on-surface-variant">
-                Approval queue
-              </p>
-              <h2 className="font-headline text-3xl font-semibold tracking-tight text-on-surface">
-                Inbox staging area
-              </h2>
-              <p className="max-w-xl text-sm text-on-surface-variant">
-                Every parsed SMS lands here first. Edit the title, category, and note before approving it into the dashboard.
-              </p>
-            </div>
-            <button
-              className="flex min-h-12 min-w-12 items-center justify-center rounded-full bg-surface-container text-on-surface active:scale-95"
-              onClick={() => setIsSettingsOpen(true)}
-              type="button"
-            >
-              <MaterialSymbol className="text-[22px]" name="tune" />
-            </button>
-          </div>
-
-          <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <MetricCard
-              hint="Waiting review"
-              icon="mark_email_unread"
-              label="Pending"
-              tone="primary"
-              value={String(dashboardSnapshot.pendingApprovalCount)}
-            />
-            <MetricCard
-              hint="Queue amount"
-              icon="payments"
-              label="Value"
-              tone="tertiary"
-              value={formatCompactCurrencyMinor(pendingValueMinor)}
-            />
-            <MetricCard
-              hint="Sender families"
-              icon="hub"
-              label="Sources"
-              tone="secondary"
-              value={String(pendingInstitutionsCount)}
-            />
-          </div>
-        </section>
-
-        <InboxPanel
-          onApproveTransaction={(transaction) => approveQueueItem(transaction.id)}
-          onEditTransaction={(transaction) => openTransactionEditor(transaction.id)}
-          onSeeAll={() => setIsSettingsOpen(true)}
-          pendingCount={dashboardSnapshot.pendingApprovalCount}
-          seeAllLabel="Parser Lab"
-          title="Inbox"
-          transactions={inboxTransactions}
-        />
-
-        <ActivityFeed
-          description="Approved transactions fall out of the inbox and become part of your ledger immediately."
-          emptyLabel="No approved history yet."
-          items={recentApprovedActivity}
-          title="Approved Recently"
-        />
-      </>
-    );
-  }
-
-  function renderInsightsView() {
-    return (
-      <>
-        <section className="rounded-[24px] bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
-          <div className="flex items-start justify-between gap-4">
-            <div className="space-y-2">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-on-surface-variant">
-                Insight snapshot
-              </p>
-              <h2 className="font-headline text-3xl font-semibold tracking-tight text-on-surface">
-                Net movement {formatSignedCurrencyMinor(netFlowMinor)}
-              </h2>
-              <p className="max-w-xl text-sm text-on-surface-variant">
-                A compact view of approved income, outgoing spend, and the categories that currently shape your month.
-              </p>
-            </div>
-            <div className="rounded-full bg-primary-container/30 p-3 text-primary">
-              <MaterialSymbol className="text-[24px]" filled name="insights" />
-            </div>
-          </div>
-
-          <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <MetricCard
-              hint="Credits approved"
-              icon="south_west"
-              label="Income"
-              tone="primary"
-              value={formatCompactCurrencyMinor(approvedIncomeMinor)}
-            />
-            <MetricCard
-              hint="Debits and transfers"
-              icon="north_east"
-              label="Outflow"
-              tone="tertiary"
-              value={formatCompactCurrencyMinor(approvedExpenseMinor)}
-            />
-            <MetricCard
-              hint="Current wallet stack"
-              icon="account_balance_wallet"
-              label="Total balance"
-              tone="secondary"
-              value={formatCompactCurrencyMinor(
-                dashboardSnapshot.totalBalanceMinor,
-              )}
-            />
-          </div>
-        </section>
-
-        <BudgetLimitCard
-          categories={budgetCards}
-          periodLabel="This Month"
-          title="Budget Limit"
-        />
-
-        <ActivityFeed
-          description="Recent approved ledger flow powering the dashboard totals."
-          emptyLabel="No approved entries yet, so insights are still empty."
-          items={recentApprovedActivity}
-          title="Recent Approved Flow"
-        />
-      </>
-    );
-  }
-
-  function renderCardsView() {
-    return (
-      <>
-        <section className="rounded-[24px] bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
-          <div className="flex items-start justify-between gap-4">
-            <div className="space-y-2">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-on-surface-variant">
-                Wallet stack
-              </p>
-              <h2 className="font-headline text-3xl font-semibold tracking-tight text-on-surface">
-                {topInstitution
-                  ? `${topInstitution.institutionName} leads your balances`
-                  : "No account balances yet"}
-              </h2>
-              <p className="max-w-xl text-sm text-on-surface-variant">
-                This is the account-focused view. It reflects the latest running balances extracted from your parsed SMS stream.
-              </p>
-            </div>
-            <div className="rounded-full bg-tertiary-container/30 p-3 text-tertiary">
-              <MaterialSymbol className="text-[24px]" filled name="credit_card" />
-            </div>
-          </div>
-
-          <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <MetricCard
-              hint="Known account surfaces"
-              icon="inventory_2"
-              label="Accounts"
-              tone="primary"
-              value={String(accountSummaries.length)}
-            />
-            <MetricCard
-              hint="Largest visible balance"
-              icon="workspace_premium"
-              label="Top balance"
-              tone="tertiary"
-              value={
-                topInstitution
-                  ? formatCompactCurrencyMinor(topInstitution.balanceMinor)
-                  : "ETB 0"
-              }
-            />
-            <MetricCard
-              hint="Bank, mobile, and cash"
-              icon="layers"
-              label="Channels"
-              tone="secondary"
-              value={String(
-                Object.values(dashboardSnapshot.balanceByChannel).filter(
-                  (balanceMinor) => balanceMinor > 0,
-                ).length,
-              )}
-            />
-          </div>
-        </section>
-
-        <BalanceSummaryCard
-          breakdown={<BalanceBreakdownGrid items={balanceBreakdownItems} />}
-          title="Visible balances"
-          totalBalanceDisplay={formatCurrencyMinor(
-            dashboardSnapshot.totalBalanceMinor,
-          )}
-        />
-
-        <AccountCarousel accounts={accountCards} title="Balance Cards" />
-
-        <ActivityFeed
-          description="Latest approved transactions mapped back to their visible account references."
-          emptyLabel="No account-linked activity is visible yet."
-          items={accountActivity}
-          title="Latest Account Activity"
-        />
-      </>
-    );
-  }
-
-  function renderActiveTab() {
-    switch (activeTab) {
-      case "inbox":
-        return renderInboxView();
-      case "insights":
-        return renderInsightsView();
-      case "cards":
-        return renderCardsView();
-      case "home":
-      default:
-        return renderHomeView();
+        );
     }
   }
 
@@ -915,6 +700,7 @@ export default function App() {
         totalBalanceDisplay={formatCurrencyMinor(
           dashboardSnapshot.totalBalanceMinor,
         )}
+        unmatchedCount={unmatchedMessages.length}
       />
 
       <EditTransactionModal

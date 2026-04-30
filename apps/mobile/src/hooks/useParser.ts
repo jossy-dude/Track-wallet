@@ -19,11 +19,16 @@ export interface QueuedParseResult {
   queueEntryId: string;
 }
 
+export interface CapturedUnmatchedParseResult {
+  status: "unmatched_captured";
+  unmatchedEntryId: string;
+}
+
 export interface UseParserResult {
   previewResult: ParserMatchResult;
   parseAndQueue: (
     input: DebugSmsInput,
-  ) => QueuedParseResult | ParserMatchResult;
+  ) => QueuedParseResult | CapturedUnmatchedParseResult;
 }
 
 export function useParser(
@@ -32,6 +37,9 @@ export function useParser(
 ): UseParserResult {
   const queueParsedTransaction = useTransactionStore(
     (state) => state.queueParsedTransaction,
+  );
+  const captureUnmatchedSms = useTransactionStore(
+    (state) => state.captureUnmatchedSms,
   );
 
   const previewResult = useMemo(
@@ -57,7 +65,16 @@ export function useParser(
     console.log("[Parser] parseAndQueue input", rawSmsMessage);
     console.log("[Parser] parseAndQueue result", parseResult);
     if (parseResult.status !== "matched") {
-      return parseResult;
+      const unmatchedEntry = captureUnmatchedSms(
+        rawSmsMessage,
+        parseResult,
+        rawSmsMessage.receivedAt,
+      );
+
+      return {
+        status: "unmatched_captured" as const,
+        unmatchedEntryId: unmatchedEntry.unmatchedEntryId,
+      };
     }
 
     const queueEntry = queueParsedTransaction(

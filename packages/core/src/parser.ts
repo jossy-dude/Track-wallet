@@ -75,6 +75,63 @@ function parseMoneyMinor(value: string | undefined): number {
   return Math.round(parsed * 100);
 }
 
+function searchMoneyMinor(text: string, patterns: readonly RegExp[]): number {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      return parseMoneyMinor(match[1]);
+    }
+  }
+
+  return 0;
+}
+
+function extractTextValue(text: string, patterns: readonly RegExp[]): string {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const value = match?.[1]?.trim();
+    if (value) {
+      return compactText(value.replace(/[.,:;-]+$/g, ""));
+    }
+  }
+
+  return "";
+}
+
+function extractReference(text: string): string | undefined {
+  const reference = extractTextValue(text, [
+    /Ref No\s+([A-Z0-9]+)/i,
+    /Txn ID\s+([A-Z0-9]+)/i,
+    /transaction number is\s+([A-Z0-9]+)/i,
+    /bank transaction number is\s+([A-Za-z0-9]+)/i,
+    /trx=([A-Za-z0-9]+)/i,
+    /voucher number is\s+([A-Za-z0-9]+)/i,
+    /id=([A-Za-z0-9]+)/i,
+  ]);
+
+  return reference || undefined;
+}
+
+function computeConfidence(
+  amountMinor: number,
+  runningBalanceMinor: number,
+  transactionDirection: TransactionDirection,
+): number {
+  let score = 0;
+
+  if (amountMinor > 0) {
+    score += 40;
+  }
+  if (runningBalanceMinor > 0) {
+    score += 40;
+  }
+  if (transactionDirection) {
+    score += 20;
+  }
+
+  return score;
+}
+
 function toTitleCase(value: string): string {
   return value
     .toLowerCase()
@@ -139,17 +196,103 @@ function createDraft(
     category:
       match.category ?? inferCategory(match.transactionDirection, merchantName),
     parserTemplateId: match.parserTemplateId,
-    confidence: 100,
+    confidence: computeConfidence(
+      match.amountMinor,
+      match.runningBalanceMinor ?? 0,
+      match.transactionDirection,
+    ),
     occurredAt:
       match.occurredAt ??
       extractOccurredAt(rawSmsMessage.smsBody, rawSmsMessage.receivedAt),
     accountReference: match.accountReference,
-    reference: match.reference,
+    reference: match.reference ?? extractReference(rawSmsMessage.smsBody),
     accountChannel:
       match.financialInstitution === "telebirr" || match.financialInstitution === "cbebirr"
         ? "mobile_money"
         : "bank",
   };
+}
+
+function parseGenericTemplateMatch(
+  rawSmsMessage: RawSmsMessage,
+  knownInstitution: FinancialInstitution | undefined,
+): TemplateMatch | null {
+  const runningBalanceMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+    /current balance is\s*(?:ETB\s*)?([\d,.]+)/i,
+    /available balance:\s*(?:ETB\s*)?([\d,.]+)/i,
+    /avail\. bal:\s*(?:ETB\s*)?([\d,.]+)/i,
+    /balance is\s*(?:ETB\s*)?([\d,.]+)/i,
+  ]);
+  const institution = knownInstitution ?? "unknown";
+
+  if (/credited/i.test(rawSmsMessage.smsBody)) {
+    const amountMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+      /credited(?: with)?\s*(?:ETB\s*)?([\d,.]+)/i,
+      /credited with\s*([\d,.]+)br/i,
+    ]);
+
+    if (amountMinor <= 0) {
+      return null;
+    }
+
+    return {
+      financialInstitution: institution,
+      transactionDirection: "credit",
+      parserTemplateId: "generic_credit_v1",
+      amountMinor,
+      runningBalanceMinor,
+      merchantName:
+        extractTextValue(rawSmsMessage.smsBody, [/from\s+(.+?)\s+on/i]) ||
+        "Generic Credit",
+    };
+  }
+
+  if (/debited/i.test(rawSmsMessage.smsBody)) {
+    const amountMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+      /debited(?: with)?\s*(?:ETB\s*)?([\d,.]+)/i,
+      /debited with\s*([\d,.]+)br/i,
+    ]);
+
+    if (amountMinor <= 0) {
+      return null;
+    }
+
+    return {
+      financialInstitution: institution,
+      transactionDirection: "debit",
+      parserTemplateId: "generic_debit_v1",
+      amountMinor,
+      runningBalanceMinor,
+      merchantName:
+        extractTextValue(rawSmsMessage.smsBody, [/to\s+(.+?)\s+on/i]) ||
+        extractTextValue(rawSmsMessage.smsBody, [/Info:\s*([^\.]+)/i]) ||
+        "Generic Debit",
+    };
+  }
+
+  if (/transfer(?:ed|red)|transferred/i.test(rawSmsMessage.smsBody)) {
+    const amountMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+      /transfer(?:ed|red)\s*(?:ETB\s*)?([\d,.]+)/i,
+      /transferred\s*([\d,.]+)br/i,
+    ]);
+
+    if (amountMinor <= 0) {
+      return null;
+    }
+
+    return {
+      financialInstitution: institution,
+      transactionDirection: "transfer",
+      parserTemplateId: "generic_transfer_v1",
+      amountMinor,
+      runningBalanceMinor,
+      merchantName:
+        extractTextValue(rawSmsMessage.smsBody, [/to\s+(.+?)\s+on/i]) ||
+        "Generic Transfer",
+    };
+  }
+
+  return null;
 }
 
 const PARSER_TEMPLATES: readonly ParserTemplate[] = [
@@ -232,6 +375,44 @@ const PARSER_TEMPLATES: readonly ParserTemplate[] = [
     },
   },
   {
+    id: "cbe_transfer_with_fees_v1",
+    senderKeys: ["cbe"],
+    matcher: ({ rawSmsMessage }) => {
+      const match = rawSmsMessage.smsBody.match(
+        /you have transfer(?:ed|red)\s+ETB\s*(?<amount>[\d,.]+)\s+to\s+(?<merchant>.+?)\s+on\s+(?<date>\d{4}-\d{2}-\d{2})/i,
+      );
+      if (!match?.groups) {
+        return null;
+      }
+
+      const serviceMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /s\.charge of ETB\s*([\d,.]+)/i,
+        /service charge of ETB\s*([\d,.]+)/i,
+        /service charge ETB\s*([\d,.]+)/i,
+      ]);
+      const vatMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /VAT\(15%\)\s*(?:of\s+)?ETB\s*([\d,.]+)/i,
+      ]);
+      const disasterMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /disaster fund \(5%\)\s*(?:of\s+)?ETB\s*([\d,.]+)/i,
+      ]);
+      const runningBalanceMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /current balance is ETB\s*([\d,.]+)/i,
+      ]);
+
+      return {
+        financialInstitution: "cbe",
+        transactionDirection: "transfer",
+        parserTemplateId: "cbe_transfer_with_fees_v1",
+        amountMinor: parseMoneyMinor(match.groups.amount),
+        feeMinor: serviceMinor + vatMinor + disasterMinor,
+        runningBalanceMinor,
+        merchantName: compactText(match.groups.merchant),
+        occurredAt: new Date(`${match.groups.date}T00:00:00.000Z`).toISOString(),
+      };
+    },
+  },
+  {
     id: "dashen_debit_v1",
     senderKeys: ["dashen", "dashenbank"],
     matcher: ({ rawSmsMessage }) => {
@@ -255,6 +436,44 @@ const PARSER_TEMPLATES: readonly ParserTemplate[] = [
     },
   },
   {
+    id: "dashen_credit_v1",
+    senderKeys: ["dashen", "dashenbank"],
+    matcher: ({ rawSmsMessage }) => {
+      const directCreditMatch = rawSmsMessage.smsBody.match(
+        /credited with ETB\s*(?<amount>[\d,.]+)\s+from\s+(?<merchant>.+?)\s+on\s+(?<date>\d{4}-\d{2}-\d{2}).*?current balance is ETB\s*(?<balance>[\d,.]+)/i,
+      );
+      if (directCreditMatch?.groups) {
+        return {
+          financialInstitution: "dashen",
+          transactionDirection: "credit",
+          parserTemplateId: "dashen_credit_v1",
+          amountMinor: parseMoneyMinor(directCreditMatch.groups.amount),
+          runningBalanceMinor: parseMoneyMinor(directCreditMatch.groups.balance),
+          merchantName: compactText(directCreditMatch.groups.merchant),
+          occurredAt: new Date(
+            `${directCreditMatch.groups.date}T00:00:00.000Z`,
+          ).toISOString(),
+        };
+      }
+
+      const incomingTransferMatch = rawSmsMessage.smsBody.match(
+        /Dear Customer,\s+(?<merchant>.+?)\s+has transferred ETB\s*(?<amount>[\d,.]+)\s+to your account.*?current balance is ETB\s*(?<balance>[\d,.]+)/i,
+      );
+      if (!incomingTransferMatch?.groups) {
+        return null;
+      }
+
+      return {
+        financialInstitution: "dashen",
+        transactionDirection: "credit",
+        parserTemplateId: "dashen_incoming_transfer_v1",
+        amountMinor: parseMoneyMinor(incomingTransferMatch.groups.amount),
+        runningBalanceMinor: parseMoneyMinor(incomingTransferMatch.groups.balance),
+        merchantName: compactText(incomingTransferMatch.groups.merchant),
+      };
+    },
+  },
+  {
     id: "telebirr_credit_v1",
     senderKeys: ["127", "telebirr"],
     matcher: ({ rawSmsMessage }) => {
@@ -271,6 +490,72 @@ const PARSER_TEMPLATES: readonly ParserTemplate[] = [
         parserTemplateId: "telebirr_credit_v1",
         amountMinor: parseMoneyMinor(match.groups.amount),
         runningBalanceMinor: parseMoneyMinor(match.groups.balance),
+        merchantName: compactText(match.groups.merchant),
+      };
+    },
+  },
+  {
+    id: "telebirr_paid_goods_v1",
+    senderKeys: ["127", "telebirr"],
+    matcher: ({ rawSmsMessage }) => {
+      const match = rawSmsMessage.smsBody.match(
+        /you have paid ETB\s*(?<amount>[\d,.]+).*?(?:goods purchased from|for package)\s+(?<merchant>.+?)\s+on/i,
+      );
+      if (!match?.groups) {
+        return null;
+      }
+
+      const serviceMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /service fee is ETB\s*([\d,.]+)/i,
+      ]);
+      const vatMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /VAT on the service fee is ETB\s*([\d,.]+)/i,
+      ]);
+      const runningBalanceMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /current (?:e-money account\s+)?balance is ETB\s*([\d,.]+)/i,
+        /balance is ETB\s*([\d,.]+)/i,
+      ]);
+
+      return {
+        financialInstitution: "telebirr",
+        transactionDirection: "debit",
+        parserTemplateId: "telebirr_paid_goods_v1",
+        amountMinor: parseMoneyMinor(match.groups.amount),
+        feeMinor: serviceMinor + vatMinor,
+        runningBalanceMinor,
+        merchantName: compactText(match.groups.merchant),
+      };
+    },
+  },
+  {
+    id: "telebirr_transfer_v1",
+    senderKeys: ["127", "telebirr"],
+    matcher: ({ rawSmsMessage }) => {
+      const match = rawSmsMessage.smsBody.match(
+        /you have transferred ETB\s*(?<amount>[\d,.]+)\s+to\s+(?<merchant>.+?)\s+on/i,
+      );
+      if (!match?.groups) {
+        return null;
+      }
+
+      const serviceMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /service fee is ETB\s*([\d,.]+)/i,
+      ]);
+      const vatMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /VAT on the service fee is ETB\s*([\d,.]+)/i,
+      ]);
+      const runningBalanceMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /current (?:e-money account\s+)?balance is ETB\s*([\d,.]+)/i,
+        /balance is ETB\s*([\d,.]+)/i,
+      ]);
+
+      return {
+        financialInstitution: "telebirr",
+        transactionDirection: "transfer",
+        parserTemplateId: "telebirr_transfer_v1",
+        amountMinor: parseMoneyMinor(match.groups.amount),
+        feeMinor: serviceMinor + vatMinor,
+        runningBalanceMinor,
         merchantName: compactText(match.groups.merchant),
       };
     },
@@ -318,6 +603,60 @@ const PARSER_TEMPLATES: readonly ParserTemplate[] = [
     },
   },
   {
+    id: "cbebirr_airtime_purchase_v1",
+    senderKeys: ["cbebirr"],
+    matcher: ({ rawSmsMessage }) => {
+      const match = rawSmsMessage.smsBody.match(
+        /you bought\s*(?<amount>[\d,.]+)br\s+of airtime for\s+(?<merchant>.+?)\s+on.*?balance is\s*(?<balance>[\d,.]+)br/i,
+      );
+      if (!match?.groups) {
+        return null;
+      }
+
+      return {
+        financialInstitution: "cbebirr",
+        transactionDirection: "debit",
+        parserTemplateId: "cbebirr_airtime_purchase_v1",
+        amountMinor: parseMoneyMinor(match.groups.amount),
+        runningBalanceMinor: parseMoneyMinor(match.groups.balance),
+        merchantName: compactText(match.groups.merchant),
+        category: "misc",
+        title: "Airtime Purchase",
+      };
+    },
+  },
+  {
+    id: "cbebirr_withdrawal_v1",
+    senderKeys: ["cbebirr"],
+    matcher: ({ rawSmsMessage }) => {
+      const match = rawSmsMessage.smsBody.match(
+        /you have withdrawn\s*(?<amount>[\d,.]+)br.*?balance is\s*(?<balance>[\d,.]+)br/i,
+      );
+      if (!match?.groups) {
+        return null;
+      }
+
+      const chargeMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /charge\s*([\d,.]+)br/i,
+      ]);
+      const taxMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /tax\s*([\d,.]+)br/i,
+      ]);
+
+      return {
+        financialInstitution: "cbebirr",
+        transactionDirection: "debit",
+        parserTemplateId: "cbebirr_withdrawal_v1",
+        amountMinor: parseMoneyMinor(match.groups.amount),
+        feeMinor: chargeMinor + taxMinor,
+        runningBalanceMinor: parseMoneyMinor(match.groups.balance),
+        merchantName: "CBE ATM",
+        category: "misc",
+        title: "ATM Withdrawal",
+      };
+    },
+  },
+  {
     id: "boa_credit_v1",
     senderKeys: ["boa"],
     matcher: ({ rawSmsMessage }) => {
@@ -334,6 +673,40 @@ const PARSER_TEMPLATES: readonly ParserTemplate[] = [
         parserTemplateId: "boa_credit_v1",
         amountMinor: parseMoneyMinor(match.groups.amount),
         merchantName: compactText(match.groups.merchant),
+      };
+    },
+  },
+  {
+    id: "boa_debit_v1",
+    senderKeys: ["boa"],
+    matcher: ({ rawSmsMessage }) => {
+      const amountMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /(?:was|has been)?\s*debited with ETB\s*([\d,.]+)/i,
+      ]);
+      if (amountMinor <= 0) {
+        return null;
+      }
+
+      const description = extractTextValue(rawSmsMessage.smsBody, [
+        /Info:\s*([^\.]+)/i,
+        /transfer description\s+(.+?)\./i,
+      ]);
+      const runningBalanceMinor = searchMoneyMinor(rawSmsMessage.smsBody, [
+        /avail\. bal:\s*ETB\s*([\d,.]+)/i,
+        /available balance:\s*ETB\s*([\d,.]+)/i,
+        /available balance in the account is ETB\s*([\d,.]+)/i,
+        /the available balance in the account is ETB\s*([\d,.]+)/i,
+      ]);
+
+      return {
+        financialInstitution: "boa",
+        transactionDirection: /transfer/i.test(rawSmsMessage.smsBody)
+          ? "transfer"
+          : "debit",
+        parserTemplateId: "boa_debit_v1",
+        amountMinor,
+        runningBalanceMinor,
+        merchantName: description || "BOA Debit",
       };
     },
   },
@@ -357,6 +730,27 @@ const PARSER_TEMPLATES: readonly ParserTemplate[] = [
       };
     },
   },
+  {
+    id: "bunna_withdrawal_v1",
+    senderKeys: ["bunna", "bunnabank"],
+    matcher: ({ rawSmsMessage }) => {
+      const match = rawSmsMessage.smsBody.match(
+        /withdrawal of\s*(?<amount>[\d,.]+)\s*etb.*?\bby\s+(?<merchant>.+?)(?:,|\s+)your current balance is\s*(?<balance>[\d,.]+)\s*etb/i,
+      );
+      if (!match?.groups) {
+        return null;
+      }
+
+      return {
+        financialInstitution: "bunna",
+        transactionDirection: "debit",
+        parserTemplateId: "bunna_withdrawal_v1",
+        amountMinor: parseMoneyMinor(match.groups.amount),
+        runningBalanceMinor: parseMoneyMinor(match.groups.balance),
+        merchantName: compactText(match.groups.merchant.replace(/,$/, "")),
+      };
+    },
+  },
 ] as const;
 
 export { PARSER_TEMPLATES };
@@ -372,12 +766,7 @@ function runParser(rawSmsMessage: RawSmsMessage): ParserMatchResult {
     template.senderKeys.includes(senderKey),
   );
 
-  const templatesToTry =
-    candidateTemplates.length > 0
-      ? candidateTemplates
-      : knownInstitution || TRANSACTION_HINT_RE.test(matcherSmsMessage.smsBody)
-        ? PARSER_TEMPLATES
-        : [];
+  const templatesToTry = candidateTemplates;
 
   const strategy = templatesToTry.length > 0 ? templatesToTry[0] : null;
   console.log(`[Parser] Sender: ${senderKey}, Match Found: ${!!strategy}`);
@@ -391,6 +780,16 @@ function runParser(rawSmsMessage: RawSmsMessage): ParserMatchResult {
     return {
       status: "matched",
       draft: createDraft(rawSmsMessage, match),
+    };
+  }
+
+  const genericMatch = TRANSACTION_HINT_RE.test(matcherSmsMessage.smsBody)
+    ? parseGenericTemplateMatch(matcherSmsMessage, knownInstitution)
+    : null;
+  if (genericMatch) {
+    return {
+      status: "matched",
+      draft: createDraft(rawSmsMessage, genericMatch),
     };
   }
 

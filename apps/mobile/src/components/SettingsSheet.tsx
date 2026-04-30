@@ -12,6 +12,7 @@ interface SettingsSheetProps {
   onClose: () => void
   pendingCount: number
   approvedCount: number
+  unmatchedCount: number
   accountCount: number
   totalBalanceDisplay: string
   debugSenderLabel: string
@@ -31,6 +32,7 @@ export function SettingsSheet({
   onClose,
   pendingCount,
   approvedCount,
+  unmatchedCount,
   accountCount,
   totalBalanceDisplay,
   debugSenderLabel,
@@ -129,6 +131,18 @@ export function SettingsSheet({
             </div>
           </article>
         </div>
+
+        <article className="mt-3 rounded-2xl bg-surface-container p-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-on-surface-variant">
+            Unmatched raw SMS
+          </div>
+          <div className="mt-2 font-headline text-2xl font-semibold text-on-surface">
+            {unmatchedCount}
+          </div>
+          <p className="mt-1 text-sm text-on-surface-variant">
+            Messages that missed the current parser templates and are waiting in the inbox review lane.
+          </p>
+        </article>
 
         <div className="mt-5 grid gap-3">
           <button
