@@ -57,30 +57,78 @@ Required backend contract:
 - approval must move the item into the approved ledger without mutating dashboard balances beforehand
 - unmatched raw messages must remain visible and dismissible without being mistaken for approved data
 
-### 3. Settings And Parser Lab
+### 3. Ledger
 
 Implemented in:
-- `apps/mobile/src/components/SettingsSheet.tsx`
+- `apps/mobile/src/App.tsx`
+- `apps/mobile/src/screens/LedgerScreen.tsx`
+
+Reads:
+- `approvedTransactions`
+- `budgetSummaries`
+- `buildDashboardSnapshot()`
+
+Required backend contract:
+- approved-ledger-derived income/outflow/net-flow metrics
+- recent approved transaction feed suitable for a transaction-first ledger surface
+- category totals that continue matching approved ledger state
+
+### 4. Accounts
+
+Implemented in:
+- `apps/mobile/src/App.tsx`
+- `apps/mobile/src/screens/CardsScreen.tsx`
+
+Reads:
+- `accountSummaries`
+- `approvedTransactions`
+- `buildDashboardSnapshot()`
+
+Required backend contract:
+- account balances grouped from approved ledger state
+- stable institution/account identity for grouped account rows
+- balance-by-channel data for allocation insight
+
+### 5. Settings Hub And Detail Pages
+
+Implemented in:
+- `apps/mobile/src/App.tsx`
+- `apps/mobile/src/screens/SettingsScreen.tsx`
+- `apps/mobile/src/screens/SettingsDetailScreen.tsx`
+- `apps/mobile/src/screens/settingsHubContent.ts`
 - `apps/mobile/src/hooks/useParser.ts`
 
 Reads:
 - parser preview result
-- total balance
-- account count
-- approved count
-- pending count
-- unmatched count
+- `syncEnabled`
+- `syncMode`
+- `syncDiscoveryState`
+- `syncStatusSummary`
+- `nearbySyncDevices`
+- `trustedSyncDevices`
+- `syncActivity`
+- `pairingCodeState`
 
 Writes:
 - `queueParsedTransaction`
 - `captureUnmatchedSms`
-- `seedDemoData`
-- `clearAllData`
+- `toggleSyncEnabled`
+- `setSyncMode`
+- `startSyncDiscovery`
+- `stopSyncDiscovery`
+- `pairNearbyDevice`
+- `updatePairingCodeInput`
+- `submitPairingCode`
+- `markTrustedDeviceAsPrimary`
+- `removeTrustedDevice`
+- `triggerManualSync`
 
 Required backend contract:
-- real SMS listener input to replace manual debug entry
-- real storage mode/status
-- future sync status and pairing state
+- real SMS listener input to replace manual parsing debug entry
+- real storage and sync health/status surfaces
+- trusted-device persistence and pairing lifecycle
+- sync actions that remain local-first and stateful across app restarts
+- authority-backed account/profile settings if the new account/settings pages are meant to persist beyond the device
 
 ## Current Store Boundary
 

@@ -27,30 +27,26 @@ import {
 } from "@omni-sync/ui";
 
 import { type ActivityFeedItem } from "./components/ActivityFeed";
-import { SettingsSheet } from "./components/SettingsSheet";
 import { type UnmatchedSmsPreview } from "./components/UnmatchedSmsPanel";
-import { useParser } from "./hooks/useParser";
 import { CardsScreen } from "./screens/CardsScreen";
 import { HomeScreen } from "./screens/HomeScreen";
 import { InboxScreen } from "./screens/InboxScreen";
-import { InsightsScreen } from "./screens/InsightsScreen";
+import { LedgerScreen } from "./screens/LedgerScreen";
+import { SettingsDetailScreen } from "./screens/SettingsDetailScreen";
+import { SettingsScreen } from "./screens/SettingsScreen";
+import {
+  getSettingsPageParent,
+  getSettingsPageTitle,
+  type SettingsPageId,
+} from "./screens/settingsHubContent";
 
-type MobileTab = "home" | "inbox" | "insights" | "cards";
+type MobileTab = "home" | "inbox" | "ledger" | "accounts";
 
 const topAppBarProfile: TopAppBarProfile = {
   avatarUrl:
     "https://lh3.googleusercontent.com/aida-public/AB6AXuApl2JJNkqTUWCzCBjNsmgpYNuGrgo7J2_M6p-6xQ6zC6bePHumpKio9CtMjNOUxWY5yDK6HVeuKBL9RY4v3THf-ME3J9f3W-K5h4NpUlLrS1KLYHKcFeuWQXt8KqAPHACNQ9qBkEpTPDTrOE0xoHTOrxan-DezI1pmu-wrqTbBkEcEAyxgcGrSCIAK-t33Putza9TpjOBz9PmXp4Slddn2OuLKKZcx9tAem8hO0IEiiqNTfF3znH0_dY2VLURavC-4hnBfasWFirA",
   avatarAlt: "Track Wallet user profile",
 };
-
-const debugSenderOptions = [
-  { value: "CBE", label: "CBE" },
-  { value: "127", label: "Telebirr" },
-  { value: "CBEBirr", label: "CBEBirr" },
-  { value: "DashenBank", label: "Dashen Bank" },
-  { value: "BOA", label: "BOA" },
-  { value: "BunnaBank", label: "Bunna Bank" },
-] as const;
 
 const categoryToneMap: Record<
   TransactionCategory,
@@ -89,8 +85,8 @@ const institutionToneMap: Record<
 const tabIconMap: Record<MobileTab, string> = {
   home: "home",
   inbox: "mail",
-  insights: "analytics",
-  cards: "credit_card",
+  ledger: "receipt_long",
+  accounts: "account_balance_wallet",
 };
 
 const currencyFormatter = new Intl.NumberFormat("en-US", {
@@ -172,14 +168,9 @@ function sortByNewest<T extends { occurredAt: string }>(items: readonly T[]): T[
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<MobileTab>("home");
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [rawInput, setRawInput] = useState("");
-  const [debugSenderLabel, setDebugSenderLabel] = useState<string>("CBE");
-  const [debugFeedback, setDebugFeedback] = useState(
-    "Paste a raw bank SMS to preview how the parser and inbox will react.",
-  );
-
-  const { previewResult, parseAndQueue } = useParser(rawInput, debugSenderLabel);
+  const [isSettingsPageOpen, setIsSettingsPageOpen] = useState(false);
+  const [activeSettingsPageId, setActiveSettingsPageId] =
+    useState<SettingsPageId | null>(null);
   const hasInitialized = useTransactionStore((state) => state.hasInitialized);
   const approvalQueue = useTransactionStore((state) => state.approvalQueue);
   const approvedTransactions = useTransactionStore(
@@ -205,7 +196,6 @@ export default function App() {
   const dismissUnmatchedSms = useTransactionStore(
     (state) => state.dismissUnmatchedSms,
   );
-  const clearAllData = useTransactionStore((state) => state.clearAllData);
 
   useEffect(() => {
     if (
@@ -451,47 +441,88 @@ export default function App() {
     [dashboardSnapshot.balanceByChannel],
   );
 
-  const previewSummary = useMemo(() => {
-    if (!rawInput.trim()) {
-      return "Preview is waiting for a pasted SMS message.";
+  function scrollToTop() {
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
     }
+  }
 
-    if (previewResult.status !== "matched") {
-      return `No parser template matched this ${debugSenderLabel} message yet.`;
-    }
+  function openSettingsPage() {
+    setIsSettingsPageOpen(true);
+    setActiveSettingsPageId(null);
+    scrollToTop();
+  }
 
-    return [
-      `Matched ${
-        FINANCIAL_INSTITUTION_LABELS[previewResult.draft.financialInstitution]
-      }`,
-      previewResult.draft.parserTemplateId,
-      formatCurrencyMinor(previewResult.draft.amountMinor),
-      TRANSACTION_CATEGORY_LABELS[previewResult.draft.category],
-      previewResult.draft.title,
-    ].join(" | ");
-  }, [debugSenderLabel, previewResult, rawInput]);
+  function closeSettingsPage() {
+    setIsSettingsPageOpen(false);
+    setActiveSettingsPageId(null);
+    scrollToTop();
+  }
+
+  function returnToSettingsHub() {
+    setActiveSettingsPageId(null);
+    scrollToTop();
+  }
+
+  function openSettingsRoute(pageId: SettingsPageId) {
+    setIsSettingsPageOpen(true);
+    setActiveSettingsPageId(pageId);
+    scrollToTop();
+  }
+
+  const activeSettingsPageParent = useMemo(
+    () =>
+      activeSettingsPageId === null
+        ? null
+        : getSettingsPageParent(activeSettingsPageId),
+    [activeSettingsPageId],
+  );
+
+  const activeSettingsTitle = useMemo(
+    () =>
+      activeSettingsPageId === null
+        ? "Settings"
+        : getSettingsPageTitle(activeSettingsPageId),
+    [activeSettingsPageId],
+  );
 
   const topAppBarAction: TopAppBarAction = useMemo(
-    () => ({
-      icon: "settings",
-      label: "Settings",
-      onPress: () => setIsSettingsOpen(true),
-    }),
-    [],
+    () =>
+      isSettingsPageOpen
+        ? {
+            icon: "arrow_back",
+            label: "Back",
+            onPress:
+              activeSettingsPageId === null
+                ? closeSettingsPage
+                : activeSettingsPageParent === null
+                  ? returnToSettingsHub
+                  : () => openSettingsRoute(activeSettingsPageParent),
+          }
+        : {
+            icon: "settings",
+            label: "Settings",
+            onPress: openSettingsPage,
+          },
+    [
+      activeSettingsPageId,
+      activeSettingsPageParent,
+      isSettingsPageOpen,
+    ],
   );
 
   const bottomNavigationItems = useMemo<BottomNavigationItem[]>(
     () =>
-      (["home", "inbox", "insights", "cards"] as const).map((tabId) => ({
+      (["home", "inbox", "ledger", "accounts"] as const).map((tabId) => ({
         id: tabId,
         label:
           tabId === "home"
             ? "Home"
             : tabId === "inbox"
               ? "Inbox"
-              : tabId === "insights"
-                ? "Insights"
-                : "Cards",
+              : tabId === "ledger"
+                ? "Ledger"
+                : "Accounts",
         icon: tabIconMap[tabId],
         isActive: activeTab === tabId,
         onPress: () => activateTab(tabId),
@@ -500,59 +531,32 @@ export default function App() {
   );
 
   function activateTab(tabId: MobileTab) {
+    setIsSettingsPageOpen(false);
+    setActiveSettingsPageId(null);
     setActiveTab(tabId);
-    if (typeof window !== "undefined") {
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    }
-  }
-
-  function handleQueueDebugSms() {
-    const trimmedInput = rawInput.trim();
-    if (!trimmedInput) {
-      setDebugFeedback("Paste a raw SMS body before queueing a parser test.");
-      return;
-    }
-
-    const result = parseAndQueue({
-      address: debugSenderLabel,
-      body: trimmedInput,
-      timestamp_ms: Date.now(),
-    });
-
-    if (result.status === "unmatched_captured") {
-      setIsSettingsOpen(false);
-      setActiveTab("inbox");
-      setDebugFeedback(
-        "No parser template matched. Saved the raw SMS into Needs Parser Review.",
-      );
-      setRawInput("");
-      return;
-    }
-
-    openTransactionEditor(result.queueEntryId);
-    setIsSettingsOpen(false);
-    setActiveTab("inbox");
-    setDebugFeedback(
-      "Queued the SMS in Inbox and opened the edit window for review.",
-    );
-    setRawInput("");
-  }
-
-  function handleClearLocalState() {
-    clearAllData();
-    closeTransactionEditor();
-    setDebugFeedback(
-      "Cleared the local browser state. Refresh now to verify the empty dashboard persists.",
-    );
-    setActiveTab("home");
-  }
-
-  function handleRestoreDemoData() {
-    seedDemoData();
-    setDebugFeedback("Restored the seeded demo data for the dashboard and inbox.");
+    scrollToTop();
   }
 
   function renderActiveTab() {
+    if (isSettingsPageOpen) {
+      if (activeSettingsPageId !== null) {
+        return (
+          <SettingsDetailScreen
+            onOpenPage={openSettingsRoute}
+            onOpenTab={activateTab}
+            pageId={activeSettingsPageId}
+          />
+        );
+      }
+
+      return (
+        <SettingsScreen
+          onOpenManageAccount={() => openSettingsRoute("account")}
+          onOpenPage={openSettingsRoute}
+        />
+      );
+    }
+
     switch (activeTab) {
       case "inbox":
         return (
@@ -565,7 +569,7 @@ export default function App() {
             onEditTransaction={(transaction) =>
               openTransactionEditor(transaction.id)
             }
-            onOpenSettings={() => setIsSettingsOpen(true)}
+            onOpenSettings={openSettingsPage}
             pendingCount={dashboardSnapshot.pendingApprovalCount}
             pendingInstitutionCount={pendingInstitutionsCount}
             pendingValueDisplay={formatCompactCurrencyMinor(pendingValueMinor)}
@@ -574,9 +578,10 @@ export default function App() {
             unmatchedMessages={unmatchedMessagePreviews}
           />
         );
-      case "insights":
+      case "ledger":
         return (
-          <InsightsScreen
+          <LedgerScreen
+            approvedTransactions={approvedTransactions}
             budgetCards={budgetCards}
             incomeDisplay={formatCompactCurrencyMinor(approvedIncomeMinor)}
             netFlowDisplay={formatSignedCurrencyMinor(netFlowMinor)}
@@ -587,12 +592,14 @@ export default function App() {
             )}
           />
         );
-      case "cards":
+      case "accounts":
         return (
           <CardsScreen
             accountActivity={accountActivity}
             accountCards={accountCards}
             accountCount={accountSummaries.length}
+            accountSummaries={accountSummaries}
+            approvedTransactions={approvedTransactions}
             balanceBreakdownItems={balanceBreakdownItems}
             topBalanceDisplay={
               topInstitution
@@ -622,7 +629,7 @@ export default function App() {
             onEditTransaction={(transaction) =>
               openTransactionEditor(transaction.id)
             }
-            onOpenAccountView={() => activateTab("cards")}
+            onOpenAccountView={() => activateTab("accounts")}
             onOpenInbox={() => activateTab("inbox")}
             pendingCount={dashboardSnapshot.pendingApprovalCount}
             recentApprovedActivity={recentApprovedActivity}
@@ -638,70 +645,52 @@ export default function App() {
     <div className="min-h-screen bg-background pb-24 text-on-background md:pb-0">
       <TopAppBar
         action={topAppBarAction}
-        brandLabel="Track Wallet"
+        brandLabel={
+          isSettingsPageOpen ? activeSettingsTitle : "Track Wallet"
+        }
         profile={topAppBarProfile}
       />
 
       <main className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-4 py-6 md:px-8">
-        <section className="hidden items-center justify-between rounded-[24px] bg-surface-container-low p-2 shadow-[0_4px_20px_rgba(46,50,48,0.06)] md:flex">
-          <div className="flex flex-wrap gap-2">
-            {bottomNavigationItems.map((item) => (
-              <button
-                className={
-                  item.isActive
-                    ? "flex min-h-11 items-center gap-2 rounded-2xl bg-primary px-4 py-2 text-sm font-semibold text-on-primary active:scale-95"
-                    : "flex min-h-11 items-center gap-2 rounded-2xl px-4 py-2 text-sm font-semibold text-on-surface-variant active:scale-95"
-                }
-                key={`desktop-${item.id}`}
-                onClick={item.onPress}
-                type="button"
-              >
-                <MaterialSymbol
-                  className="text-[20px]"
-                  filled={item.isActive}
-                  name={item.icon}
-                />
-                {item.label}
-              </button>
-            ))}
-          </div>
+        {!isSettingsPageOpen ? (
+          <section className="hidden items-center justify-between rounded-[24px] bg-surface-container-low p-2 shadow-[0_4px_20px_rgba(46,50,48,0.06)] md:flex">
+            <div className="flex flex-wrap gap-2">
+              {bottomNavigationItems.map((item) => (
+                <button
+                  className={
+                    item.isActive
+                      ? "flex min-h-11 items-center gap-2 rounded-2xl bg-primary px-4 py-2 text-sm font-semibold text-on-primary active:scale-95"
+                      : "flex min-h-11 items-center gap-2 rounded-2xl px-4 py-2 text-sm font-semibold text-on-surface-variant active:scale-95"
+                  }
+                  key={`desktop-${item.id}`}
+                  onClick={item.onPress}
+                  type="button"
+                >
+                  <MaterialSymbol
+                    className="text-[20px]"
+                    filled={item.isActive}
+                    name={item.icon}
+                  />
+                  {item.label}
+                </button>
+              ))}
+            </div>
 
-          <div className="text-right">
-            <div className="text-xs font-semibold uppercase tracking-[0.14em] text-on-surface-variant">
-              Active view
+            <div className="text-right">
+              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-on-surface-variant">
+                Active view
+              </div>
+              <div className="font-headline text-lg font-semibold text-on-surface">
+                {bottomNavigationItems.find((item) => item.isActive)?.label ?? "Home"}
+              </div>
             </div>
-            <div className="font-headline text-lg font-semibold text-on-surface">
-              {bottomNavigationItems.find((item) => item.isActive)?.label ?? "Home"}
-            </div>
-          </div>
-        </section>
+          </section>
+        ) : null}
 
         {renderActiveTab()}
       </main>
 
-      <BottomNavBar items={bottomNavigationItems} />
-
-      <SettingsSheet
-        accountCount={accountSummaries.length}
-        approvedCount={approvedTransactions.length}
-        debugFeedback={debugFeedback}
-        debugSenderLabel={debugSenderLabel}
-        debugSenderOptions={debugSenderOptions}
-        isOpen={isSettingsOpen}
-        onClearLocalState={handleClearLocalState}
-        onClose={() => setIsSettingsOpen(false)}
-        onDebugSenderChange={setDebugSenderLabel}
-        onQueueDebugSms={handleQueueDebugSms}
-        onRawInputChange={setRawInput}
-        onRestoreDemoData={handleRestoreDemoData}
-        pendingCount={dashboardSnapshot.pendingApprovalCount}
-        previewSummary={previewSummary}
-        rawInput={rawInput}
-        totalBalanceDisplay={formatCurrencyMinor(
-          dashboardSnapshot.totalBalanceMinor,
-        )}
-        unmatchedCount={unmatchedMessages.length}
-      />
+      {!isSettingsPageOpen ? <BottomNavBar items={bottomNavigationItems} /> : null}
 
       <EditTransactionModal
         categoryOptions={categoryOptions}
