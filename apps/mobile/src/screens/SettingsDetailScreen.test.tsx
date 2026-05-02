@@ -21,6 +21,7 @@ function updateInputValue(input: HTMLInputElement, value: string) {
 beforeEach(() => {
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
   transactionStore.getState().clearAllData();
+  window.localStorage.clear();
 });
 
 afterEach(() => {
@@ -38,6 +39,7 @@ describe("SettingsDetailScreen", () => {
     expect(html).toContain("Theme");
     expect(html).toContain("Color Accent");
     expect(html).toContain("Layout Density");
+    expect(html).toContain("Navigation dock");
   });
 
   it("renders the parsing editor layout for the parsing destination", () => {
@@ -45,9 +47,62 @@ describe("SettingsDetailScreen", () => {
       <SettingsDetailScreen pageId="parsing" />,
     );
 
+    expect(html).toContain("SMS Parsing Logic");
+    expect(html).toContain("Templates");
+    expect(html).toContain("Sandbox");
+    expect(html).toContain("Diagnostics");
+    expect(html).toContain("Regex Templates");
     expect(html).toContain("Extraction Function");
-    expect(html).toContain("Live Sandbox");
-    expect(html).toContain("Regex Quick Reference");
+  });
+
+  it("hydrates a saved parser workspace from local storage", () => {
+    window.localStorage.setItem(
+      "trackwallet.mobile.parser-workspace",
+      JSON.stringify({
+        version: 1,
+        templates: [
+          {
+            id: "telebirr_local_v1",
+            institutionKey: "127",
+            institutionLabel: "Telebirr",
+            institutionIcon: "account_balance_wallet",
+            name: "Telebirr Local Draft",
+            version: "v0.2.0",
+            updated: "Updated just now",
+            status: "draft",
+            regex: "ETB\\\\s(?<amount>[\\\\d,]+\\\\.\\\\d{2})",
+            note: "Locally persisted template draft.",
+            healthScore: null,
+            sourceType: "local",
+          },
+        ],
+        selectedTemplateId: "telebirr_local_v1",
+        senderLabel: "127",
+        strictSchemaParsing: false,
+        preserveRawSms: true,
+        autoReconciliation: true,
+        verboseLogging: true,
+      }),
+    );
+
+    const html = renderToStaticMarkup(
+      <SettingsDetailScreen pageId="parsing" />,
+    );
+
+    expect(html).toContain("Telebirr Local Draft");
+  });
+
+  it("renders the redesigned data and storage management surface", () => {
+    const html = renderToStaticMarkup(
+      <SettingsDetailScreen pageId="dataStorage" />,
+    );
+
+    expect(html).toContain("Data &amp; Storage");
+    expect(html).toContain("Database Management");
+    expect(html).toContain("Export JSON Backup");
+    expect(html).toContain("Data Integrity");
+    expect(html).toContain("Logging");
+    expect(html).toContain("Historical Import");
   });
 
   it("renders a dedicated account settings page", () => {
@@ -57,10 +112,12 @@ describe("SettingsDetailScreen", () => {
 
     expect(html).toContain("Manage Account");
     expect(html).toContain("Display name");
+    expect(html).toContain("Description");
+    expect(html).not.toContain("Workspace note");
     expect(html).toContain("Export personal data");
   });
 
-  it("expands featured help answers with realistic Track Wallet guidance", () => {
+  it("expands featured help answers with app-specific Track Wallet guidance", () => {
     document.body.innerHTML = "<div id=\"root\"></div>";
     const container = document.getElementById("root");
 
@@ -74,16 +131,19 @@ describe("SettingsDetailScreen", () => {
       root.render(<SettingsDetailScreen pageId="help" />);
     });
 
+    expect(container.textContent).toContain("Track Wallet Help Center");
     expect(container.textContent).toContain(
-      "Why are some SMS messages still unmatched?",
+      "Why didn't my home total change after I received an SMS?",
     );
     expect(container.textContent).not.toContain(
-      "When a bank changes wording, the message stays in Inbox review instead of being forced into the ledger.",
+      "Incoming messages become Inbox drafts first, so Home totals stay unchanged until you review and approve the entry.",
     );
 
     const buttons = Array.from(container.querySelectorAll("button"));
     const faqButton = buttons.find((button) =>
-      button.textContent?.includes("Why are some SMS messages still unmatched?"),
+      button.textContent?.includes(
+        "Why didn't my home total change after I received an SMS?",
+      ),
     );
 
     expect(faqButton).toBeDefined();
@@ -93,7 +153,7 @@ describe("SettingsDetailScreen", () => {
     });
 
     expect(container.textContent).toContain(
-      "When a bank changes wording, the message stays in Inbox review instead of being forced into the ledger.",
+      "Incoming messages become Inbox drafts first, so Home totals stay unchanged until you review and approve the entry.",
     );
 
     act(() => {
@@ -129,6 +189,8 @@ describe("SettingsDetailScreen", () => {
     expect(container.textContent).toContain(
       "Use the 6-digit pairing code or nearby discovery to move a device into the trusted route list.",
     );
+    expect(container.textContent).toContain("Coming soon");
+    expect(container.textContent).toContain("Remote revocation timeline");
 
     act(() => {
       root.unmount();
@@ -232,16 +294,15 @@ describe("SettingsDetailScreen", () => {
       root.render(<SettingsDetailScreen pageId="parsing" />);
     });
 
-    const buttons = Array.from(container.querySelectorAll("button"));
-    const focusEditorButton = buttons.find((button) =>
+    const focusEditorButton = Array.from(container.querySelectorAll("button")).find((button) =>
       button.textContent?.includes("Focus editor"),
     );
-    const queueButton = buttons.find((button) =>
-      button.textContent?.includes("Queue to Inbox"),
+    const sandboxTabButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Sandbox"),
     );
 
     expect(focusEditorButton).toBeDefined();
-    expect(queueButton).toBeDefined();
+    expect(sandboxTabButton).toBeDefined();
 
     act(() => {
       focusEditorButton?.dispatchEvent(
@@ -249,7 +310,25 @@ describe("SettingsDetailScreen", () => {
       );
     });
 
-    expect(container.textContent).toContain("Focused parser editor");
+    expect(
+      container.querySelector('button[aria-label="Close panel"]'),
+    ).toBeDefined();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Close panel"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    act(() => {
+      sandboxTabButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const queueButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Queue to Inbox"),
+    );
+
+    expect(queueButton).toBeDefined();
 
     act(() => {
       queueButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -318,7 +397,7 @@ describe("SettingsDetailScreen", () => {
     });
 
     expect(container.textContent).toContain(
-      "is now trusted and available in Sync.",
+      "is now available as a local preview route in Sync.",
     );
 
     act(() => {

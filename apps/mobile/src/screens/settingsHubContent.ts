@@ -5,6 +5,7 @@ export type SettingsCategoryId =
   | "appearance"
   | "security"
   | "sync"
+  | "dataStorage"
   | "parsing"
   | "forwarding"
   | "advanced";
@@ -77,6 +78,21 @@ const settingsCategories: Record<SettingsCategoryId, SettingsCategory> = {
       "Local privacy controls",
     ],
   },
+  dataStorage: {
+    id: "dataStorage",
+    title: "Data & Storage",
+    description: "Import, export, backup, and local data controls",
+    icon: "database",
+    accent: "tertiary",
+    detailEyebrow: "Local data",
+    detailSummary:
+      "Manage imports, exports, backups, and local authority over stored data and history.",
+    detailHighlights: [
+      "Import and export",
+      "Backups and recovery",
+      "Local history controls",
+    ],
+  },
   sync: {
     id: "sync",
     title: "Sync & Devices",
@@ -146,6 +162,7 @@ export const settingsHubSections: readonly SettingsCategorySection[] = [
     categories: [
       settingsCategories.appearance,
       settingsCategories.security,
+      settingsCategories.dataStorage,
       settingsCategories.sync,
     ],
   },

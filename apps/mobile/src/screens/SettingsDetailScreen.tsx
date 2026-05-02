@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 
 import {
   FINANCIAL_INSTITUTION_LABELS,
@@ -8,12 +8,35 @@ import {
 import { transactionStore, useTransactionStore } from "@omni-sync/database";
 import { MaterialSymbol } from "@omni-sync/ui";
 
+import {
+  MotionPanel,
+  SettingsMotionStyles,
+  StatusChip,
+  pressableClass,
+} from "../components/settingsMotionPrimitives";
 import { useParser } from "../hooks/useParser";
+import {
+  persistBottomNavStylePreference,
+  persistCurrencyLabelPreference,
+  persistDefaultAccountIdPreference,
+  persistAccountOrderPreference,
+  readBottomNavStylePreference,
+  readCurrencyLabelPreference,
+  readDefaultAccountIdPreference,
+  type BottomNavStylePreference,
+  type CurrencyLabelPreference,
+} from "../preferences/displayPreferences";
+import {
+  clearParserWorkspacePreferences,
+  persistParserWorkspacePreferences,
+  readParserWorkspacePreferences,
+} from "../preferences/parserPreferences";
 import {
   helpCategoryCards,
   helpFeaturedFaqs,
   type HelpCategoryCard,
 } from "./settingsHelpContent";
+import { DataStoragePage } from "./DataStoragePage";
 import { type SettingsPageId } from "./settingsHubContent";
 
 type AppTabId = "home" | "inbox" | "ledger" | "accounts";
@@ -22,6 +45,7 @@ interface SettingsDetailScreenProps {
   pageId: SettingsPageId;
   onOpenPage?: (pageId: SettingsPageId) => void;
   onOpenTab?: (tabId: AppTabId) => void;
+  orderedAccountIds?: readonly string[];
 }
 
 const currencyFormatter = new Intl.NumberFormat("en-US", {
@@ -49,6 +73,35 @@ const parserSenderOptions = [
   { value: "BunnaBank", label: "Bunna Bank" },
 ] as const;
 
+const parserSandboxFallbackSamples: Record<string, string> = {
+  CBE: "CBE ALERT: Your account 4920 was debited with ETB 450.00 on 2026-04-29 at GROCERY STORE. Bal ETB 8450.00",
+  DashenBank:
+    "Dashen Alert: ETB 1,250.00 debited from account 7788 on 2026-04-28 at FUEL STATION. Available balance ETB 19,880.00",
+  127: "Telebirr: ETB 320.00 paid to COFFEE SHOP from wallet 0172 on 2026-04-28. Current balance ETB 1,880.00",
+  BOA: "BOA ALERT: ETB 980.00 credited to account 2104 on 2026-04-27 from CLIENT PAYMENT. Bal ETB 15,420.00",
+  BunnaBank:
+    "Bunna alert: ETB 215.00 debited from account 1633 on 2026-04-26 at TAXI FARE. Bal ETB 5,615.00",
+};
+
+function matchesParserSenderFamily(sourceValue: string, senderLabel: string) {
+  const normalizedSender = senderLabel.trim().toLowerCase();
+  const normalizedSource = sourceValue.trim().toLowerCase();
+
+  if (normalizedSender.includes(normalizedSource)) {
+    return true;
+  }
+
+  if (normalizedSource === "dashenbank") {
+    return normalizedSender.includes("dashen");
+  }
+
+  if (normalizedSource === "127") {
+    return normalizedSender.includes("telebirr") || normalizedSender === "127";
+  }
+
+  return false;
+}
+
 const appearanceAccents = [
   { id: "forest", color: "bg-primary", selected: true },
   { id: "amber", color: "bg-tertiary", selected: false },
@@ -56,6 +109,23 @@ const appearanceAccents = [
   { id: "sage", color: "bg-[#8aa390]", selected: false },
   { id: "ocean", color: "bg-[#5a7c8c]", selected: false },
 ] as const;
+
+const bottomNavStyleOptions: Array<{
+  id: BottomNavStylePreference;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "detached",
+    label: "Detached dock",
+    description: "Split rails with the add action floating between them.",
+  },
+  {
+    id: "connected",
+    label: "Connected dock",
+    description: "One curved dock with a center notch around the add action.",
+  },
+];
 
 function formatCurrencyMinor(amountMinor: number): string {
   return `ETB ${currencyFormatter.format(amountMinor / 100)}`;
@@ -112,7 +182,7 @@ function SwitchButton({
     <button
       aria-label={ariaLabel}
       aria-checked={checked}
-      className={`relative h-7 w-14 rounded-full transition-colors ${
+      className={`relative h-7 w-14 rounded-full transition-[background-color,transform,opacity] duration-150 ease-out active:scale-[0.96] ${
         checked
           ? "bg-primary"
           : "border border-outline-variant bg-surface-variant"
@@ -160,14 +230,14 @@ function StatusToast({
         : "warning";
 
   return (
-    <div className="sticky top-2 z-30 flex justify-start">
+    <MotionPanel className="sticky top-2 z-30 flex justify-start" variant="toast">
       <div
         className={`flex max-w-xl items-start gap-3 rounded-2xl border px-4 py-3 shadow-[0_8px_24px_rgba(46,50,48,0.08)] ${toneClass}`}
       >
         <MaterialSymbol className="mt-0.5 text-[18px]" filled name={icon} />
         <p className="text-sm leading-6">{message}</p>
       </div>
-    </div>
+    </MotionPanel>
   );
 }
 
@@ -187,7 +257,11 @@ function ActionStatusButton({
   onClick: () => void;
 }) {
   return (
-    <button className={className} onClick={onClick} type="button">
+    <button
+      className={`${className} ${pressableClass}`}
+      onClick={onClick}
+      type="button"
+    >
       {actionState === "done" ? (
         <>
           <MaterialSymbol filled name="check" />
@@ -218,27 +292,40 @@ function OverlayPanel({
 }) {
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#2e3230]/45 p-4 backdrop-blur-sm">
-      <div className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-[28px] border border-outline-variant/30 bg-background p-6 shadow-[0_16px_48px_rgba(46,50,48,0.24)]">
-        <div className="mb-6 flex items-start justify-between gap-4">
-          <div>
-            <h3 className="font-headline text-2xl font-semibold text-on-surface">
-              {title}
-            </h3>
-            <p className="mt-2 text-sm leading-6 text-on-surface-variant">
-              {subtitle}
-            </p>
+      <MotionPanel className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-[28px] border border-outline-variant/30 bg-background p-6 shadow-[0_16px_48px_rgba(46,50,48,0.24)]">
+        {title || subtitle ? (
+          <div className="mb-6 flex items-start justify-between gap-4">
+            <div>
+              <h3 className="font-headline text-2xl font-semibold text-on-surface">
+                {title}
+              </h3>
+              <p className="mt-2 text-sm leading-6 text-on-surface-variant">
+                {subtitle}
+              </p>
+            </div>
+            <button
+              aria-label="Close panel"
+              className={`flex h-10 w-10 items-center justify-center rounded-full bg-surface-container text-on-surface transition hover:bg-surface-container-high ${pressableClass}`}
+              onClick={onClose}
+              type="button"
+            >
+              <MaterialSymbol name="close" />
+            </button>
           </div>
-          <button
-            aria-label="Close panel"
-            className="flex h-10 w-10 items-center justify-center rounded-full bg-surface-container text-on-surface transition hover:bg-surface-container-high"
-            onClick={onClose}
-            type="button"
-          >
-            <MaterialSymbol name="close" />
-          </button>
-        </div>
+        ) : (
+          <div className="mb-3 flex justify-end">
+            <button
+              aria-label="Close panel"
+              className={`flex h-10 w-10 items-center justify-center rounded-full bg-surface-container text-on-surface transition hover:bg-surface-container-high ${pressableClass}`}
+              onClick={onClose}
+              type="button"
+            >
+              <MaterialSymbol name="close" />
+            </button>
+          </div>
+        )}
         {children}
-      </div>
+      </MotionPanel>
     </div>
   );
 }
@@ -290,7 +377,7 @@ function ManageAccountPage() {
       {statusToast ? (
         <StatusToast message={statusToast.message} tone={statusToast.tone} />
       ) : null}
-      <header className="space-y-2">
+      <MotionPanel className="space-y-2">
         <h2 className="font-headline text-3xl font-semibold text-on-surface">
           Manage Account
         </h2>
@@ -298,9 +385,12 @@ function ManageAccountPage() {
           Update your identity, profile image, and privacy controls for this
           mobile workspace.
         </p>
-      </header>
+      </MotionPanel>
 
-      <section className="rounded-[28px] border border-outline-variant/20 bg-surface-container p-5 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
+      <MotionPanel
+        className="rounded-[28px] border border-outline-variant/20 bg-surface-container p-5 shadow-[0_4px_20px_rgba(46,50,48,0.06)]"
+        delay={50}
+      >
         <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-4">
             <div className="relative">
@@ -322,7 +412,7 @@ function ManageAccountPage() {
             </div>
           </div>
           <button
-            className="rounded-2xl border border-outline-variant/40 bg-surface px-4 py-3 text-sm font-semibold text-primary transition active:scale-[0.99]"
+            className={`rounded-2xl border border-outline-variant/40 bg-surface px-4 py-3 text-sm font-semibold text-primary ${pressableClass}`}
             onClick={() =>
               showAccountStatus(
                 "Native photo picking lands in the device integration pass. The profile shell is ready for it.",
@@ -334,10 +424,13 @@ function ManageAccountPage() {
             Choose profile image
           </button>
         </div>
-      </section>
+      </MotionPanel>
 
       <div className="grid gap-6 lg:grid-cols-[1.3fr_0.9fr]">
-        <section className="space-y-4 rounded-[28px] border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
+        <MotionPanel
+          className="space-y-4 rounded-[28px] border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]"
+          delay={110}
+        >
           <label className="block">
             <span className="mb-2 block text-sm font-semibold text-on-surface">
               Display name
@@ -350,9 +443,14 @@ function ManageAccountPage() {
             />
           </label>
           <label className="block">
-            <span className="mb-2 block text-sm font-semibold text-on-surface">
-              Workspace note
-            </span>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="block text-sm font-semibold text-on-surface">
+                Description
+              </span>
+              <StatusChip icon="phone_iphone" tone="neutral">
+                Local on this phone
+              </StatusChip>
+            </div>
             <textarea
               className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface focus:border-primary focus:ring-1 focus:ring-primary"
               onChange={(event) => setProfileNote(event.target.value)}
@@ -370,9 +468,12 @@ function ManageAccountPage() {
               screens stay understandable later.
             </p>
           </div>
-        </section>
+        </MotionPanel>
 
-        <section className="space-y-4 rounded-[28px] border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
+        <MotionPanel
+          className="space-y-4 rounded-[28px] border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]"
+          delay={170}
+        >
           <div className="rounded-2xl bg-surface p-4">
             <p className="text-sm font-semibold text-on-surface">
               Privacy controls
@@ -408,7 +509,7 @@ function ManageAccountPage() {
             </div>
           </div>
           <button
-            className="w-full rounded-2xl border border-outline-variant/30 bg-surface px-4 py-3 text-sm font-semibold text-on-surface transition active:scale-[0.99]"
+            className={`w-full rounded-2xl border border-outline-variant/30 bg-surface px-4 py-3 text-sm font-semibold text-on-surface ${pressableClass}`}
             onClick={() =>
               showAccountStatus(
                 "Profile export is staged as a local action until backend export packaging is wired.",
@@ -420,13 +521,13 @@ function ManageAccountPage() {
             Export personal data
           </button>
           <button
-            className="w-full rounded-2xl border border-error/20 bg-error/10 px-4 py-3 text-sm font-semibold text-error transition active:scale-[0.99]"
+            className={`w-full rounded-2xl border border-error/20 bg-error/10 px-4 py-3 text-sm font-semibold text-error ${pressableClass}`}
             onClick={handleResetProfile}
             type="button"
           >
             Clear local profile cache
           </button>
-        </section>
+        </MotionPanel>
       </div>
 
       <ActionStatusButton
@@ -441,11 +542,29 @@ function ManageAccountPage() {
   );
 }
 
-function AppearancePage() {
+function AppearancePage({
+  orderedAccountIds = [],
+}: {
+  orderedAccountIds?: readonly string[];
+}) {
+  const accountSummaries = useTransactionStore((state) => state.accountSummaries);
   const [theme, setTheme] = useState<"light" | "dark" | "system">("light");
   const [fontScale, setFontScale] = useState("3");
   const [density, setDensity] = useState<"compact" | "balanced" | "spaced">(
     "balanced",
+  );
+  const [currencyLabel, setCurrencyLabel] = useState<CurrencyLabelPreference>(() =>
+    readCurrencyLabelPreference(),
+  );
+  const [bottomNavStyle, setBottomNavStyle] =
+    useState<BottomNavStylePreference>(() => readBottomNavStylePreference());
+  const [defaultAccountId, setDefaultAccountId] = useState<string | null>(() =>
+    readDefaultAccountIdPreference(),
+  );
+  const [accountOrderIds, setAccountOrderIds] = useState<string[]>(() =>
+    orderedAccountIds.length > 0
+      ? [...orderedAccountIds]
+      : accountSummaries.map((account) => account.accountId),
   );
   const [selectedAccent, setSelectedAccent] = useState("forest");
   const [saveState, setSaveState] = useState<ActionState>("idle");
@@ -457,14 +576,70 @@ function AppearancePage() {
   function handleSave() {
     setSaveState("working");
     setTimeout(() => {
+      persistCurrencyLabelPreference(currencyLabel);
+      persistBottomNavStylePreference(bottomNavStyle);
+      persistDefaultAccountIdPreference(defaultAccountId);
+      persistAccountOrderPreference(accountOrderIds);
       setSaveState("done");
       setStatusToast({
         tone: "success",
-        message: "Appearance preferences were saved locally on this device.",
+        message:
+          "Appearance preferences were saved locally on this device and Home updated immediately.",
       });
       setTimeout(() => setSaveState("idle"), 1200);
       setTimeout(() => setStatusToast(null), 2200);
     }, 700);
+  }
+
+  useEffect(() => {
+    if (accountSummaries.length === 0) {
+      setAccountOrderIds([]);
+      return;
+    }
+
+    setAccountOrderIds((current) => {
+      const source =
+        orderedAccountIds.length > 0
+          ? [...orderedAccountIds]
+          : accountSummaries.map((account) => account.accountId);
+      const existing = source.filter((accountId) =>
+        accountSummaries.some((account) => account.accountId === accountId),
+      );
+      const missing = accountSummaries
+        .map((account) => account.accountId)
+        .filter((accountId) => !existing.includes(accountId));
+      return [...existing, ...missing];
+    });
+  }, [accountSummaries, orderedAccountIds]);
+
+  const orderedAccounts = useMemo(() => {
+    const rank = new Map(accountOrderIds.map((accountId, index) => [accountId, index]));
+    return [...accountSummaries].sort(
+      (left, right) =>
+        (rank.get(left.accountId) ?? Number.MAX_SAFE_INTEGER) -
+        (rank.get(right.accountId) ?? Number.MAX_SAFE_INTEGER),
+    );
+  }, [accountOrderIds, accountSummaries]);
+
+  function moveAccount(accountId: string, direction: "up" | "down") {
+    setAccountOrderIds((current) => {
+      const index = current.indexOf(accountId);
+
+      if (index === -1) {
+        return current;
+      }
+
+      const nextIndex = direction === "up" ? index - 1 : index + 1;
+
+      if (nextIndex < 0 || nextIndex >= current.length) {
+        return current;
+      }
+
+      const next = [...current];
+      const [account] = next.splice(index, 1);
+      next.splice(nextIndex, 0, account);
+      return next;
+    });
   }
 
   return (
@@ -472,7 +647,7 @@ function AppearancePage() {
       {statusToast ? (
         <StatusToast message={statusToast.message} tone={statusToast.tone} />
       ) : null}
-      <header className="space-y-2">
+      <MotionPanel className="space-y-2">
         <h2 className="font-headline text-3xl font-semibold text-on-surface">
           Appearance
         </h2>
@@ -480,9 +655,9 @@ function AppearancePage() {
           Tune the visual language of Track Wallet across light, dense, and
           calm viewing modes.
         </p>
-      </header>
+      </MotionPanel>
 
-      <section className="space-y-4">
+      <MotionPanel className="space-y-4" delay={40}>
         <h3 className="font-headline text-2xl font-semibold text-on-surface">
           Theme
         </h3>
@@ -497,7 +672,7 @@ function AppearancePage() {
           ] as const).map((option) => (
             <button
               aria-pressed={theme === option.id}
-              className="group flex flex-col items-center gap-4 rounded-xl p-1 text-left transition active:scale-[0.99]"
+              className={`group flex flex-col items-center gap-4 rounded-xl p-1 text-left transition ${pressableClass}`}
               key={option.id}
               onClick={() => setTheme(option.id)}
               type="button"
@@ -575,11 +750,11 @@ function AppearancePage() {
             </button>
           ))}
         </div>
-      </section>
+      </MotionPanel>
 
       <div className="h-px bg-outline-variant/30" />
 
-      <section className="space-y-6">
+      <MotionPanel className="space-y-6" delay={90}>
         <h3 className="font-headline text-2xl font-semibold text-on-surface">
           Color Accent
         </h3>
@@ -590,7 +765,7 @@ function AppearancePage() {
                 aria-pressed={selectedAccent === accent.id}
                 className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${
                   accent.color
-                } ${
+                } ${pressableClass} ${
                   selectedAccent === accent.id
                     ? "ring-4 ring-primary-container/40 ring-offset-2 ring-offset-surface-container-low"
                     : ""
@@ -610,10 +785,186 @@ function AppearancePage() {
             ))}
           </div>
         </div>
-      </section>
+      </MotionPanel>
 
       <div className="grid gap-6 md:grid-cols-2">
-        <section className="flex flex-col justify-between rounded-xl border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
+        <MotionPanel
+          className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]"
+          delay={110}
+        >
+          <h3 className="font-headline text-xl font-semibold text-on-surface">
+            Currency label
+          </h3>
+          <p className="mt-2 text-sm text-on-surface-variant">
+            Pick how the currency mark is shown across key totals.
+          </p>
+          <div className="mt-5 flex flex-wrap gap-2">
+            {(["ETB", "Br", "Birr"] as const).map((label) => (
+              <button
+                aria-pressed={currencyLabel === label}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${pressableClass} ${
+                  currencyLabel === label
+                    ? "bg-primary text-on-primary"
+                    : "bg-surface text-on-surface-variant"
+                }`}
+                key={label}
+                onClick={() => setCurrencyLabel(label)}
+                type="button"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </MotionPanel>
+
+          <MotionPanel
+            className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]"
+            delay={145}
+          >
+          <h3 className="font-headline text-xl font-semibold text-on-surface">
+            Default account
+          </h3>
+          <p className="mt-2 text-sm text-on-surface-variant">
+            This account stays pinned first in the Home pocket stack.
+          </p>
+          <div className="mt-5 space-y-3">
+            {accountSummaries.length > 0 ? (
+              <>
+                <label className="block">
+                  <span className="mb-2 block text-sm font-semibold text-on-surface">
+                    Select account
+                  </span>
+                  <select
+                    className="w-full rounded-2xl border border-outline-variant/20 bg-surface px-4 py-3 text-on-surface focus:border-primary focus:ring-1 focus:ring-primary"
+                    onChange={(event) =>
+                      setDefaultAccountId(event.target.value || null)
+                    }
+                    value={defaultAccountId ?? ""}
+                  >
+                    {orderedAccounts.map((account) => (
+                      <option key={account.accountId} value={account.accountId}>
+                        {account.institutionName} • {account.maskedAccountNumber}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {defaultAccountId ? (
+                  <div className="rounded-2xl bg-surface px-4 py-3 text-sm text-on-surface-variant">
+                    Pinned first:{" "}
+                    <span className="font-semibold text-on-surface">
+                      {orderedAccounts.find((account) => account.accountId === defaultAccountId)
+                        ?.institutionName ?? "Selected account"}
+                    </span>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="rounded-2xl border border-dashed border-outline-variant/24 bg-surface p-4 text-sm text-on-surface-variant">
+                Default account becomes available once tracked accounts exist.
+              </div>
+              )}
+            </div>
+          </MotionPanel>
+        </div>
+
+        <MotionPanel
+          className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]"
+          delay={170}
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="font-headline text-xl font-semibold text-on-surface">
+                Navigation dock
+              </h3>
+              <p className="mt-2 text-sm text-on-surface-variant">
+                Choose whether the add action floats between split rails or sits
+                above one curved dock.
+              </p>
+            </div>
+            <StatusChip icon="dock" tone="neutral">
+              Mobile only
+            </StatusChip>
+          </div>
+
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
+            {bottomNavStyleOptions.map((option) => {
+              const isSelected = bottomNavStyle === option.id;
+
+              return (
+                <button
+                  aria-pressed={isSelected}
+                  className={`rounded-[24px] border p-4 text-left transition ${pressableClass} ${
+                    isSelected
+                      ? "border-primary/30 bg-primary/8"
+                      : "border-outline-variant/18 bg-surface"
+                  }`}
+                  key={option.id}
+                  onClick={() => setBottomNavStyle(option.id)}
+                  type="button"
+                >
+                  <div className="relative h-[112px] overflow-hidden rounded-[22px] bg-[linear-gradient(180deg,#243041,#30445e)] px-4 pt-4">
+                    {option.id === "detached" ? (
+                      <div className="absolute inset-x-4 bottom-4 grid grid-cols-[minmax(0,1fr)_58px_minmax(0,1fr)] items-end gap-2">
+                        <div className="flex h-[42px] items-center justify-evenly rounded-[18px] bg-white/95 px-2 shadow-[0_8px_22px_rgba(20,24,28,0.18)]">
+                          <span className="h-2 w-2 rounded-full bg-[#6f7e84]" />
+                          <span className="h-2 w-2 rounded-full bg-[#6f7e84]" />
+                        </div>
+                        <div className="relative flex justify-center">
+                          <div className="absolute bottom-0 h-12 w-12 rounded-full bg-[#66a06e]/30 blur-lg" />
+                          <div className="relative flex h-11 w-11 items-center justify-center rounded-full bg-[#4a7c59] ring-[5px] ring-[#eef2eb]">
+                            <span className="text-lg font-semibold text-white">+</span>
+                          </div>
+                        </div>
+                        <div className="flex h-[42px] items-center justify-evenly rounded-[18px] bg-white/95 px-2 shadow-[0_8px_22px_rgba(20,24,28,0.18)]">
+                          <span className="h-2 w-2 rounded-full bg-[#6f7e84]" />
+                          <span className="h-2 w-2 rounded-full bg-[#9bc3a2]" />
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="absolute inset-x-4 bottom-4">
+                        <div className="absolute inset-x-0 bottom-0 h-[48px] rounded-[20px] bg-white/95 shadow-[0_10px_24px_rgba(20,24,28,0.18)]" />
+                        <div className="absolute left-1/2 top-[-18px] h-[56px] w-[56px] -translate-x-1/2 rounded-full bg-[#243041]" />
+                        <div className="absolute left-1/2 top-[-8px] h-[44px] w-[44px] -translate-x-1/2 rounded-full bg-[#4a7c59] ring-[5px] ring-[#eef2eb]" />
+                        <div className="relative grid grid-cols-[minmax(0,1fr)_56px_minmax(0,1fr)] items-end gap-2 px-2 pt-2">
+                          <div className="flex h-[42px] items-center justify-evenly">
+                            <span className="h-2 w-2 rounded-full bg-[#6f7e84]" />
+                            <span className="h-2 w-2 rounded-full bg-[#6f7e84]" />
+                          </div>
+                          <div />
+                          <div className="flex h-[42px] items-center justify-evenly">
+                            <span className="h-2 w-2 rounded-full bg-[#6f7e84]" />
+                            <span className="h-2 w-2 rounded-full bg-[#9bc3a2]" />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-4 flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-on-surface">
+                        {option.label}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-on-surface-variant">
+                        {option.description}
+                      </p>
+                    </div>
+                    {isSelected ? (
+                      <span className="rounded-full bg-primary px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-on-primary">
+                        Active
+                      </span>
+                    ) : null}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </MotionPanel>
+
+        <div className="grid gap-6 md:grid-cols-2">
+          <MotionPanel
+            className="flex flex-col justify-between rounded-xl border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]"
+          delay={180}
+        >
           <div>
             <h3 className="font-headline text-xl font-semibold text-on-surface">
               Typography
@@ -634,9 +985,12 @@ function AppearancePage() {
             />
             <MaterialSymbol className="text-2xl text-on-surface-variant" name="format_size" />
           </div>
-        </section>
+        </MotionPanel>
 
-        <section className="flex flex-col justify-between rounded-xl border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
+        <MotionPanel
+          className="flex flex-col justify-between rounded-xl border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]"
+          delay={220}
+        >
           <div>
             <h3 className="font-headline text-xl font-semibold text-on-surface">
               Layout Density
@@ -649,7 +1003,7 @@ function AppearancePage() {
             {(["compact", "balanced", "spaced"] as const).map((option) => (
               <button
                 aria-pressed={density === option}
-                className={`flex-1 py-3 text-sm font-medium capitalize ${
+                className={`flex-1 py-3 text-sm font-medium capitalize ${pressableClass} ${
                   density === option
                     ? "bg-primary-container/20 font-semibold text-primary"
                     : "text-on-surface-variant"
@@ -662,8 +1016,60 @@ function AppearancePage() {
               </button>
             ))}
           </div>
-        </section>
+        </MotionPanel>
       </div>
+
+      <MotionPanel
+        className="rounded-[26px] border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]"
+        delay={260}
+      >
+        <div className="space-y-3">
+          <div className="flex items-center gap-3">
+            <h3 className="font-headline text-xl font-semibold text-on-surface">
+              Account deck order
+            </h3>
+            <StatusChip icon="account_balance_wallet" tone="success">
+              Home and Accounts
+            </StatusChip>
+          </div>
+          <p className="max-w-2xl text-sm leading-6 text-on-surface-variant">
+            Choose which card leads the deck first, then which ones follow behind it.
+          </p>
+        </div>
+        <div className="mt-5 space-y-3">
+          {orderedAccounts.map((account, index) => (
+            <div
+              className="flex items-center justify-between gap-3 rounded-2xl bg-surface px-4 py-3"
+              key={account.accountId}
+            >
+              <div className="min-w-0">
+                <p className="font-semibold text-on-surface">{account.institutionName}</p>
+                <p className="text-xs text-on-surface-variant">
+                  #{index + 1} • {account.maskedAccountNumber}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-container text-on-surface-variant disabled:opacity-40"
+                  disabled={index === 0}
+                  onClick={() => moveAccount(account.accountId, "up")}
+                  type="button"
+                >
+                  <MaterialSymbol name="keyboard_arrow_up" />
+                </button>
+                <button
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-container text-on-surface-variant disabled:opacity-40"
+                  disabled={index === orderedAccounts.length - 1}
+                  onClick={() => moveAccount(account.accountId, "down")}
+                  type="button"
+                >
+                  <MaterialSymbol name="keyboard_arrow_down" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </MotionPanel>
 
       <ActionStatusButton
         actionState={saveState}
@@ -680,6 +1086,10 @@ function AppearancePage() {
 function SecurityPage() {
   const trustedSyncDevices = useTransactionStore((state) => state.trustedSyncDevices);
   const [biometricsEnabled, setBiometricsEnabled] = useState(true);
+  const [requireBiometricOnOpen, setRequireBiometricOnOpen] = useState(true);
+  const [requireBiometricOnApprove, setRequireBiometricOnApprove] = useState(true);
+  const [requireBiometricOnDelete, setRequireBiometricOnDelete] = useState(true);
+  const [requireBiometricOnForwarding, setRequireBiometricOnForwarding] = useState(false);
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(true);
   const [saveState, setSaveState] = useState<ActionState>("idle");
   const [isBiometricsPanelOpen, setIsBiometricsPanelOpen] = useState(false);
@@ -881,30 +1291,61 @@ function SecurityPage() {
         >
           <div className="grid gap-6 md:grid-cols-[1.1fr_0.9fr]">
             <section className="space-y-4 rounded-[24px] border border-outline-variant/20 bg-surface-container-low p-5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-base font-semibold text-on-surface">
-                    Require biometrics to open Track Wallet
-                  </p>
-                  <p className="mt-1 text-sm text-on-surface-variant">
-                    This protects the approval inbox and account balances when
-                    someone else picks up your phone.
-                  </p>
-                </div>
-                <SwitchButton
-                  checked={biometricsEnabled}
-                  onToggle={() => setBiometricsEnabled((current) => !current)}
-                />
-              </div>
-              <div className="rounded-2xl bg-surface p-4">
-                <p className="text-sm font-semibold text-on-surface">
-                  Trusted scenarios
-                </p>
-                <ul className="mt-3 space-y-2 text-sm text-on-surface-variant">
-                  <li>Unlock before opening Inbox edits</li>
-                  <li>Unlock before exporting personal data</li>
-                  <li>Unlock before changing forwarding recipients</li>
-                </ul>
+              <div className="space-y-3">
+                {[
+                  {
+                    label: "Require biometrics to open Track Wallet",
+                    detail:
+                      "Protect the approval inbox and account balances when someone else picks up your phone.",
+                    checked: requireBiometricOnOpen,
+                    onToggle: () =>
+                      setRequireBiometricOnOpen((current) => !current),
+                  },
+                  {
+                    label: "Require biometrics before approval",
+                    detail:
+                      "Gate Inbox approval so posted ledger entries need your fingerprint or face unlock.",
+                    checked: requireBiometricOnApprove,
+                    onToggle: () =>
+                      setRequireBiometricOnApprove((current) => !current),
+                  },
+                  {
+                    label: "Require biometrics before delete",
+                    detail:
+                      "Use an extra check before removing manual or reviewed transactions.",
+                    checked: requireBiometricOnDelete,
+                    onToggle: () =>
+                      setRequireBiometricOnDelete((current) => !current),
+                  },
+                  {
+                    label: "Require biometrics for forwarding changes",
+                    detail:
+                      "Lock recipient and routing edits behind biometrics.",
+                    checked: requireBiometricOnForwarding,
+                    onToggle: () =>
+                      setRequireBiometricOnForwarding((current) => !current),
+                  },
+                ].map((rule) => (
+                  <div
+                    className="rounded-2xl bg-surface p-4"
+                    key={rule.label}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <p className="text-base font-semibold text-on-surface">
+                          {rule.label}
+                        </p>
+                        <p className="mt-1 text-sm text-on-surface-variant">
+                          {rule.detail}
+                        </p>
+                      </div>
+                      <SwitchButton
+                        checked={rule.checked}
+                        onToggle={rule.onToggle}
+                      />
+                    </div>
+                  </div>
+                ))}
               </div>
             </section>
 
@@ -937,65 +1378,334 @@ function SecurityPage() {
 }
 
 function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
-  const [senderLabel, setSenderLabel] = useState<string>("CBE");
-  const [rawInput, setRawInput] = useState(
-    "CBE ALERT: Your account 4920 was debited with ETB 450.00 on 2026-04-29 at GROCERY STORE. Bal ETB 8450.00",
+  type ParserWorkspaceTab = "templates" | "sandbox" | "diagnostics";
+  type ParserTemplateStatus = "active" | "draft" | "fallback" | "disabled";
+  interface ParserTemplateCard {
+    id: string;
+    institutionKey: string;
+    institutionLabel: string;
+    institutionIcon: string;
+    name: string;
+    version: string;
+    updated: string;
+    status: ParserTemplateStatus;
+    regex: string;
+    note: string;
+    healthScore: number | null;
+    sourceType: "core" | "local";
+  }
+
+  const initialParserTemplates: ParserTemplateCard[] = [
+    {
+      id: "cbe_debit_v1",
+      institutionKey: "CBE",
+      institutionLabel: "Commercial Bank of Ethiopia",
+      institutionIcon: "account_balance",
+      name: "Debit Notification",
+      version: "v1.0.0",
+      updated: "Updated 2d ago",
+      status: "active",
+      regex:
+        "debited with ETB\\s(?<amount>[\\d,]+\\.\\d{2}).*?at\\s(?<merchant>.*?)\\.\\sBal ETB\\s(?<balance>[\\d,]+\\.\\d{2})",
+      note: "Primary debit route with running balance capture.",
+      healthScore: 99.2,
+      sourceType: "core",
+    },
+    {
+      id: "dashen_debit_v1",
+      institutionKey: "DashenBank",
+      institutionLabel: "Dashen Bank",
+      institutionIcon: "account_balance",
+      name: "Purchase Alert",
+      version: "v1.2.0",
+      updated: "Updated 5h ago",
+      status: "draft",
+      regex:
+        "debited from account\\s(?<account>[\\d*]+).*?at\\s(?<merchant>.*?)\\.\\sAvailable balance ETB\\s(?<balance>[\\d,]+\\.\\d{2})",
+      note: "Draft route being tuned for merchant extraction.",
+      healthScore: 84.7,
+      sourceType: "core",
+    },
+    {
+      id: "telebirr_paid_goods_v1",
+      institutionKey: "127",
+      institutionLabel: "Telebirr",
+      institutionIcon: "account_balance_wallet",
+      name: "Paid Goods",
+      version: "v1.4.3",
+      updated: "Updated 1w ago",
+      status: "active",
+      regex:
+        "ETB\\s(?<amount>[\\d,]+\\.\\d{2})\\spaid to\\s(?<merchant>.*?)\\sfrom wallet\\s(?<account>[\\d*]+).*?balance ETB\\s(?<balance>[\\d,]+\\.\\d{2})",
+      note: "Mobile-money payment route with wallet balance capture.",
+      healthScore: 97.6,
+      sourceType: "core",
+    },
+    {
+      id: "generic_credit_v1",
+      institutionKey: "BOA",
+      institutionLabel: "Bank of Abyssinia",
+      institutionIcon: "account_balance_wallet",
+      name: "Generic Credit Fallback",
+      version: "v0.9.5",
+      updated: "Updated 1w ago",
+      status: "fallback",
+      regex:
+        "(?<merchant>.*)\\s(?<amount>[\\d,]+\\.\\d{2}).*?(?<currency>ETB|USD)?.*?(?<balance>[\\d,]+\\.\\d{2})?",
+      note: "Fallback route for evolving sender formats.",
+      healthScore: 71.4,
+      sourceType: "core",
+    },
+  ];
+
+  const persistedWorkspace = useMemo(() => readParserWorkspacePreferences(), []);
+  const [activeParserTab, setActiveParserTab] =
+    useState<ParserWorkspaceTab>("templates");
+  const [senderLabel, setSenderLabel] = useState<string>(
+    persistedWorkspace?.senderLabel ?? "CBE",
   );
+  const approvedTransactions = useTransactionStore(
+    (state) => state.approvedTransactions,
+  );
+  const approvalQueue = useTransactionStore((state) => state.approvalQueue);
+  const unmatchedMessages = useTransactionStore((state) => state.unmatchedMessages);
+  const [templateCards, setTemplateCards] = useState<ParserTemplateCard[]>(
+    persistedWorkspace?.templates.length
+      ? persistedWorkspace.templates
+      : initialParserTemplates,
+  );
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(
+    persistedWorkspace?.selectedTemplateId ||
+      persistedWorkspace?.templates[0]?.id ||
+      initialParserTemplates[0]?.id ||
+      "",
+  );
+  const [sandboxInputMode, setSandboxInputMode] = useState<"latest" | "manual">(
+    "latest",
+  );
+  const [rawInput, setRawInput] = useState(parserSandboxFallbackSamples.CBE);
   const [feedback, setFeedback] = useState(
-    "Save is visual for now. Queueing sends the draft into Inbox using the live mobile parser path.",
+    "Run tests here, then send trusted drafts into Inbox through the live parser path.",
   );
   const [saveState, setSaveState] = useState<ActionState>("idle");
   const [queueState, setQueueState] = useState<ActionState>("idle");
   const [isFocusedEditorOpen, setIsFocusedEditorOpen] = useState(false);
+  const [isTemplateBuilderOpen, setIsTemplateBuilderOpen] = useState(false);
+  const [strictSchemaParsing, setStrictSchemaParsing] = useState(
+    persistedWorkspace?.strictSchemaParsing ?? true,
+  );
+  const [preserveRawSms, setPreserveRawSms] = useState(
+    persistedWorkspace?.preserveRawSms ?? true,
+  );
+  const [autoReconciliation, setAutoReconciliation] = useState(
+    persistedWorkspace?.autoReconciliation ?? false,
+  );
+  const [verboseLogging, setVerboseLogging] = useState(
+    persistedWorkspace?.verboseLogging ?? false,
+  );
+  const [templateBuilderDraft, setTemplateBuilderDraft] = useState({
+    sender: "CBE",
+    name: "",
+    regex: "",
+    direction: "debit",
+    amountKey: "amount",
+    merchantKey: "merchant",
+    balanceKey: "balance",
+    feeKey: "fee",
+    vatKey: "vat",
+    accountKey: "account",
+    dateMode: "message_date",
+  });
   const [statusToast, setStatusToast] = useState<{
     tone: StatusTone;
     message: string;
   } | null>(null);
+  const parserPackInputRef = useRef<HTMLInputElement | null>(null);
   const { previewResult, parseAndQueue } = useParser(rawInput, senderLabel);
   const openTransactionEditor = useTransactionStore(
     (state) => state.openTransactionEditor,
   );
 
-  const parserSource = `1  function parseSMS(message) {
-2    // Example: "CBE ALERT: Your account 4920 was debited..."
-3    const regex = /debited with ETB (\\d+\\.\\d{2}).* at (.*?)\\. Bal ETB/;
-4    const match = message.match(regex);
-5
-6    if (match) {
-7      return {
-8        amount: parseFloat(match[1]),
-9        merchant: match[2].trim(),
-10       category: "food"
-11     };
-12   }
-13   return null;
-14 }`;
+  const latestCapturedMessage = useMemo(() => {
+    const latestQueueMatch = approvalQueue.find((queueItem) =>
+      matchesParserSenderFamily(senderLabel, queueItem.senderLabel),
+    );
 
-  const previewText =
-    previewResult.status === "matched"
-      ? JSON.stringify(
-          {
-            amount: previewResult.draft.amountMinor / 100,
-            title: previewResult.draft.title,
-            category: TRANSACTION_CATEGORY_LABELS[previewResult.draft.category],
-            institution:
-              FINANCIAL_INSTITUTION_LABELS[
-                previewResult.draft.financialInstitution
-              ],
-            occurredAt: previewResult.draft.occurredAt,
-          },
-          null,
-          2,
-        )
-      : JSON.stringify(
-          {
-            status: "unmatched",
-            reason: previewResult.failureReason,
-            sender: previewResult.senderLabel,
-          },
-          null,
-          2,
-        );
+    if (latestQueueMatch) {
+      return latestQueueMatch.rawBody;
+    }
+
+    const latestUnmatchedMatch = unmatchedMessages.find((message) =>
+      matchesParserSenderFamily(senderLabel, message.senderLabel),
+    );
+
+    return (
+      latestUnmatchedMatch?.smsBody ??
+      parserSandboxFallbackSamples[senderLabel] ??
+      parserSandboxFallbackSamples.CBE
+    );
+  }, [approvalQueue, senderLabel, unmatchedMessages]);
+
+  useEffect(() => {
+    if (sandboxInputMode !== "latest") {
+      return;
+    }
+
+    setRawInput(latestCapturedMessage);
+  }, [latestCapturedMessage, sandboxInputMode]);
+
+  useEffect(() => {
+    if (templateCards.some((template) => template.id === selectedTemplateId)) {
+      return;
+    }
+
+    setSelectedTemplateId(templateCards[0]?.id ?? "");
+  }, [selectedTemplateId, templateCards]);
+
+  useEffect(() => {
+    persistParserWorkspacePreferences({
+      version: 1,
+      templates: templateCards,
+      selectedTemplateId,
+      senderLabel,
+      strictSchemaParsing,
+      preserveRawSms,
+      autoReconciliation,
+      verboseLogging,
+    });
+  }, [
+    autoReconciliation,
+    preserveRawSms,
+    selectedTemplateId,
+    senderLabel,
+    strictSchemaParsing,
+    templateCards,
+    verboseLogging,
+  ]);
+
+  const selectedTemplate = useMemo(
+    () =>
+      templateCards.find((template) => template.id === selectedTemplateId) ??
+      templateCards[0] ??
+      null,
+    [selectedTemplateId, templateCards],
+  );
+
+  const groupedTemplates = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        label: string;
+        icon: string;
+        templates: ParserTemplateCard[];
+      }
+    >();
+
+    for (const template of templateCards) {
+      const current = groups.get(template.institutionKey);
+
+      if (current) {
+        current.templates.push(template);
+      } else {
+        groups.set(template.institutionKey, {
+          label: template.institutionLabel,
+          icon: template.institutionIcon,
+          templates: [template],
+        });
+      }
+    }
+
+    return [...groups.entries()];
+  }, [templateCards]);
+
+  const parserSource = useMemo(() => {
+    if (!selectedTemplate) {
+      return "";
+    }
+
+    return `1  function parseSMS(message) {
+2    const regex = /${selectedTemplate.regex}/i;
+3    const match = message.match(regex);
+4
+5    if (!match?.groups) {
+6      return null;
+7    }
+8
+9    return {
+10     amount: match.groups.${templateBuilderDraft.amountKey} ?? null,
+11     merchant: match.groups.${templateBuilderDraft.merchantKey} ?? null,
+12     balance: match.groups.${templateBuilderDraft.balanceKey} ?? null,
+13     fee: match.groups.${templateBuilderDraft.feeKey} ?? null,
+14     account: match.groups.${templateBuilderDraft.accountKey} ?? null,
+15   };
+16 }`;
+  }, [selectedTemplate, templateBuilderDraft.accountKey, templateBuilderDraft.amountKey, templateBuilderDraft.balanceKey, templateBuilderDraft.feeKey, templateBuilderDraft.merchantKey]);
+
+  const previewRows = useMemo(() => {
+    if (previewResult.status !== "matched") {
+      return [
+        ["status", "unmatched"],
+        ["reason", previewResult.failureReason],
+        ["sender", previewResult.senderLabel],
+        ["template", "none"],
+      ] as Array<[string, string]>;
+    }
+
+    return [
+      ["amount", `ETB ${(previewResult.draft.amountMinor / 100).toFixed(2)}`],
+      ["merchant", previewResult.draft.merchantName],
+      ["date", previewResult.draft.occurredAt.slice(0, 10)],
+      [
+        "balance",
+        previewResult.draft.reportedBalanceMinor
+          ? `ETB ${(previewResult.draft.reportedBalanceMinor / 100).toFixed(2)}`
+          : "null",
+      ],
+      ["template", previewResult.draft.parserTemplateId],
+      ["category", TRANSACTION_CATEGORY_LABELS[previewResult.draft.category]],
+    ] as Array<[string, string]>;
+  }, [previewResult]);
+
+  const totalTemplateMatches = useMemo(
+    () =>
+      approvedTransactions.filter((transaction) =>
+        templateCards.some((template) => template.id === transaction.parserTemplateId),
+      ).length,
+    [approvedTransactions, templateCards],
+  );
+
+  const activeTemplateCount = useMemo(
+    () => templateCards.filter((template) => template.status === "active").length,
+    [templateCards],
+  );
+
+  const driftConfidence = useMemo(() => {
+    const denominator = totalTemplateMatches + unmatchedMessages.length;
+    if (denominator <= 0) {
+      return 100;
+    }
+
+    return Math.max(
+      55,
+      Math.min(100, Math.round((totalTemplateMatches / denominator) * 100)),
+    );
+  }, [totalTemplateMatches, unmatchedMessages.length]);
+
+  const driftLabel =
+    driftConfidence >= 95 ? "Low" : driftConfidence >= 82 ? "Watch" : "Elevated";
+
+  const bankCoveragePercent = useMemo(() => {
+    const supportedInstitutions = new Set(
+      templateCards
+        .filter((template) => template.status !== "disabled")
+        .map((template) => template.institutionKey),
+    );
+    return Math.round(
+      (supportedInstitutions.size / parserSenderOptions.length) * 100,
+    );
+  }, [templateCards]);
+
+  const recentParserAlert = unmatchedMessages[0];
 
   function showParserStatus(message: string, tone: StatusTone) {
     setStatusToast({ message, tone });
@@ -1005,9 +1715,19 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
   function handleSave() {
     setSaveState("working");
     setTimeout(() => {
+      setTemplateCards((current) =>
+        current.map((template) =>
+          template.id === selectedTemplate?.id
+            ? {
+                ...template,
+                updated: "Updated just now",
+              }
+            : template,
+        ),
+      );
       setSaveState("done");
       showParserStatus(
-        "Template edits were saved locally for this parser preview workspace.",
+        "Template workspace saved locally on this device.",
         "success",
       );
       setTimeout(() => setSaveState("idle"), 1200);
@@ -1039,7 +1759,7 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
       }
 
       setFeedback(
-        "No parser template matched. The raw SMS was sent to Inbox review instead of forcing it into the ledger.",
+        "No parser template matched. The raw SMS was routed into the parser error queue for review.",
       );
       showParserStatus(
         "This message stayed unmatched. Review it in Inbox before changing parser rules.",
@@ -1050,213 +1770,1143 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
     }, 900);
   }
 
+  function handleSandboxTest() {
+    if (previewResult.status === "matched") {
+      setFeedback(
+        "Sandbox test matched. Review the parsed fields below before queueing.",
+      );
+      showParserStatus("Sandbox test matched this message.", "success");
+      return;
+    }
+
+    setFeedback(
+      "Sandbox test stayed unmatched. Adjust the sample SMS or extraction rule before queueing.",
+    );
+    showParserStatus("Sandbox test stayed unmatched.", "warning");
+  }
+
+  function updateSelectedTemplate(
+    updater: (template: ParserTemplateCard) => ParserTemplateCard,
+  ) {
+    if (!selectedTemplate) {
+      return;
+    }
+
+    setTemplateCards((current) =>
+      current.map((template) =>
+        template.id === selectedTemplate.id ? updater(template) : template,
+      ),
+    );
+  }
+
+  function handleDuplicateTemplate() {
+    if (!selectedTemplate) {
+      return;
+    }
+
+    const duplicatedTemplate: ParserTemplateCard = {
+      ...selectedTemplate,
+      id: `${selectedTemplate.id}-copy-${Date.now()}`,
+      name: `${selectedTemplate.name} Copy`,
+      version: "v0.1.0",
+      updated: "Updated just now",
+      status: "draft",
+      sourceType: "local",
+    };
+
+    setTemplateCards((current) => [duplicatedTemplate, ...current]);
+    setSelectedTemplateId(duplicatedTemplate.id);
+    showParserStatus("Duplicated the selected template into a local draft.", "success");
+  }
+
+  function handlePrimaryTemplate() {
+    if (!selectedTemplate) {
+      return;
+    }
+
+    setTemplateCards((current) =>
+      current.map((template) => {
+        if (template.institutionKey !== selectedTemplate.institutionKey) {
+          return template;
+        }
+
+        if (template.id === selectedTemplate.id) {
+          return {
+            ...template,
+            status: "active",
+            updated: "Updated just now",
+          };
+        }
+
+        if (template.status === "active") {
+          return {
+            ...template,
+            status: "fallback",
+          };
+        }
+
+        return template;
+      }),
+    );
+    showParserStatus("Marked this template as the primary route.", "success");
+  }
+
+  function handleFallbackTemplate() {
+    updateSelectedTemplate((template) => ({
+      ...template,
+      status: "fallback",
+      updated: "Updated just now",
+    }));
+    showParserStatus("Marked this template as a fallback route.", "warning");
+  }
+
+  function handleToggleTemplateState() {
+    if (!selectedTemplate) {
+      return;
+    }
+
+    updateSelectedTemplate((template) => ({
+      ...template,
+      status: template.status === "disabled" ? "active" : "disabled",
+      updated: "Updated just now",
+    }));
+    showParserStatus(
+      selectedTemplate.status === "disabled"
+        ? "Template re-enabled for live matching."
+        : "Template disabled without deleting its history.",
+      "warning",
+    );
+  }
+
+  function handleCreateTemplate() {
+    if (!templateBuilderDraft.name.trim() || !templateBuilderDraft.regex.trim()) {
+      showParserStatus("Add both a template name and a regex before saving.", "error");
+      return;
+    }
+
+    const senderOption =
+      parserSenderOptions.find((option) => option.value === templateBuilderDraft.sender) ??
+      parserSenderOptions[0];
+
+    const nextTemplate: ParserTemplateCard = {
+      id: `${senderOption.value.toLowerCase()}-draft-${Date.now()}`,
+      institutionKey: senderOption.value,
+      institutionLabel: senderOption.label,
+      institutionIcon:
+        senderOption.value === "127" ? "account_balance_wallet" : "account_balance",
+      name: templateBuilderDraft.name.trim(),
+      version: "v0.1.0",
+      updated: "Updated just now",
+      status: "draft",
+      regex: templateBuilderDraft.regex.trim(),
+      note: `${templateBuilderDraft.direction} route with ${templateBuilderDraft.amountKey}, ${templateBuilderDraft.merchantKey}, ${templateBuilderDraft.balanceKey}`,
+      healthScore: null,
+      sourceType: "local",
+    };
+
+    setTemplateCards((current) => [nextTemplate, ...current]);
+    setSelectedTemplateId(nextTemplate.id);
+    setSenderLabel(senderOption.value);
+    setIsTemplateBuilderOpen(false);
+    setTemplateBuilderDraft((current) => ({
+      ...current,
+      name: "",
+      regex: "",
+    }));
+    showParserStatus("Created a new local draft template.", "success");
+  }
+
+  function downloadParserPack() {
+    if (typeof window === "undefined" || typeof document === "undefined") {
+      return;
+    }
+
+    const payload = {
+      kind: "trackwallet-parser-pack",
+      version: 1,
+      createdAt: new Date().toISOString(),
+      templates: templateCards,
+      settings: {
+        strictSchemaParsing,
+        preserveRawSms,
+        autoReconciliation,
+        verboseLogging,
+      },
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `trackwallet-parser-pack-${new Date()
+      .toISOString()
+      .slice(0, 10)}.json`;
+    anchor.click();
+    window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
+    showParserStatus("Exported the local parser pack.", "success");
+  }
+
+  async function handleImportParserPack(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as {
+        kind?: string;
+        templates?: ParserTemplateCard[];
+        settings?: {
+          strictSchemaParsing?: boolean;
+          preserveRawSms?: boolean;
+          autoReconciliation?: boolean;
+          verboseLogging?: boolean;
+        };
+      };
+
+      if (parsed.kind !== "trackwallet-parser-pack" || !Array.isArray(parsed.templates)) {
+        throw new Error("Unsupported parser pack.");
+      }
+
+      setTemplateCards(parsed.templates);
+      setSelectedTemplateId(parsed.templates[0]?.id ?? "");
+      setStrictSchemaParsing(parsed.settings?.strictSchemaParsing ?? true);
+      setPreserveRawSms(parsed.settings?.preserveRawSms ?? true);
+      setAutoReconciliation(parsed.settings?.autoReconciliation ?? false);
+      setVerboseLogging(parsed.settings?.verboseLogging ?? false);
+      showParserStatus(`Loaded parser pack from ${file.name}.`, "success");
+    } catch (error) {
+      showParserStatus(
+        error instanceof Error ? error.message : "Could not read the parser pack.",
+        "error",
+      );
+    }
+  }
+
+  function handlePurgeParserCache() {
+    clearParserWorkspacePreferences();
+    setTemplateCards(initialParserTemplates);
+    setSelectedTemplateId(initialParserTemplates[0]?.id ?? "");
+    setSenderLabel("CBE");
+    setStrictSchemaParsing(true);
+    setPreserveRawSms(true);
+    setAutoReconciliation(false);
+    setVerboseLogging(false);
+    showParserStatus("Reset local parser cache and preview controls.", "warning");
+  }
+
   return (
-    <section className="space-y-6">
+    <section className="space-y-6 pb-28">
       {statusToast ? (
         <StatusToast message={statusToast.message} tone={statusToast.tone} />
       ) : null}
-      <header className="flex items-center justify-between gap-4 rounded-xl border border-outline-variant/20 bg-surface-container-low p-4 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
-        <div>
-          <h2 className="font-headline text-xl font-bold text-primary">
-            SMS Parsing Logic
-          </h2>
-          <p className="text-sm text-on-surface-variant">
-            Edit extraction rules, preview live parsing, and push drafts into
-            Inbox.
-          </p>
-        </div>
-        <ActionStatusButton
-          actionState={saveState}
-          className="inline-flex items-center gap-2 rounded-full px-4 py-2 font-medium text-primary transition hover:bg-surface-container-high"
-          doneLabel="Saved"
-          idleLabel="Save"
-          onClick={handleSave}
-          workingLabel="Saving..."
-        />
-      </header>
 
-      <section className="overflow-hidden rounded-xl border border-outline-variant/30 bg-surface-container-low">
-        <div className="flex items-center justify-between border-b border-outline-variant/30 bg-surface-container px-6 py-4">
-          <h3 className="font-headline text-lg font-semibold text-on-surface">
-            Extraction Function
-          </h3>
-          <div className="flex items-center gap-2">
-            <button
-              className="rounded-full border border-outline-variant/30 bg-surface px-3 py-1.5 text-xs font-semibold text-primary"
-              onClick={() => setIsFocusedEditorOpen(true)}
-              type="button"
-            >
-              Focus editor
-            </button>
-            <span className="rounded bg-surface-container-highest px-2 py-1 font-mono text-xs text-on-surface-variant">
-              JavaScript
-            </span>
-          </div>
-        </div>
-        <div className="overflow-x-auto bg-[#2e3230] p-4 font-mono text-sm leading-relaxed text-[#eae6de]">
-          <pre>
-            <code>{parserSource}</code>
-          </pre>
-        </div>
-      </section>
+      <input
+        accept=".json,application/json"
+        className="hidden"
+        onChange={handleImportParserPack}
+        ref={parserPackInputRef}
+        type="file"
+      />
 
-      <div className="grid gap-6 md:grid-cols-2">
-        <section className="flex flex-col gap-4 rounded-xl border border-outline-variant/30 bg-surface-container-lowest p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
-          <div className="flex items-center gap-2">
-            <MaterialSymbol className="text-primary" name="science" />
-            <h3 className="font-headline text-lg font-semibold text-on-surface">
-              Live Sandbox
-            </h3>
-          </div>
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium text-on-surface-variant">
-              Sender Family
-            </span>
-            <select
-              className="w-full rounded-lg border-none bg-surface-container px-3 py-3 text-on-surface focus:ring-2 focus:ring-primary"
-              onChange={(event) => setSenderLabel(event.target.value)}
-              value={senderLabel}
-            >
-              {parserSenderOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium text-on-surface-variant">
-              Sample SMS
-            </span>
-            <textarea
-              className="w-full resize-none rounded-lg border-none bg-surface-container p-3 text-on-surface focus:ring-2 focus:ring-primary"
-              onChange={(event) => setRawInput(event.target.value)}
-              rows={4}
-              value={rawInput}
-            />
-          </label>
-          <div className="flex-1">
-            <span className="mb-2 block text-sm font-medium text-on-surface-variant">
-              Parsed Result
-            </span>
-            <div className="rounded-lg border border-primary-fixed bg-primary-fixed/20 p-4 font-mono text-sm text-on-primary-fixed-variant">
-              <div className="mb-2 flex items-center gap-1 font-medium">
-                <MaterialSymbol
-                  className="text-sm"
-                  name={
-                    previewResult.status === "matched"
-                      ? "check_circle"
-                      : "warning"
-                  }
-                />
-                {previewResult.status === "matched" ? "Success" : "Unmatched"}
-              </div>
-              <pre>{previewText}</pre>
-            </div>
-            <p className="mt-3 text-xs text-on-surface-variant">{feedback}</p>
+      <header className="rounded-[28px] border border-outline-variant/20 bg-surface-container-low p-4 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="font-headline text-2xl font-bold text-primary">
+              SMS Parsing Logic
+            </h2>
+            <p className="mt-1 text-sm text-on-surface-variant">
+              Manage templates, run live tests, inspect parser drift, and send
+              trusted drafts into Inbox.
+            </p>
           </div>
           <ActionStatusButton
-            actionState={queueState}
-            className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full bg-primary px-5 py-3 text-sm font-semibold text-on-primary disabled:opacity-50"
-            doneLabel="Queued"
-            idleLabel="Queue to Inbox"
-            onClick={handleQueue}
-            workingLabel="Queueing..."
+            actionState={saveState}
+            className="inline-flex items-center gap-2 rounded-full px-4 py-2 font-medium text-primary transition hover:bg-surface-container-high"
+            doneLabel="Saved"
+            idleLabel="Save"
+            onClick={handleSave}
+            workingLabel="Saving..."
           />
-        </section>
+        </div>
 
-        <section className="flex flex-col rounded-xl border border-outline-variant/20 bg-surface-container p-6">
-          <div className="mb-4 flex items-center gap-2">
-            <MaterialSymbol className="text-secondary" name="menu_book" />
-            <h3 className="font-headline text-lg font-semibold text-on-surface">
-              Regex Quick Reference
-            </h3>
+        <nav className="mt-5 flex gap-2">
+          {([
+            { id: "templates", label: "Templates" },
+            { id: "sandbox", label: "Sandbox" },
+            { id: "diagnostics", label: "Diagnostics" },
+          ] as const).map((tab) => (
+            <button
+              className={`flex-1 rounded-xl px-4 py-3 text-center text-sm font-bold transition-all ${pressableClass} ${
+                activeParserTab === tab.id
+                  ? "bg-primary/10 text-primary"
+                  : "text-on-surface-variant hover:bg-surface"
+              }`}
+              key={tab.id}
+              onClick={() => setActiveParserTab(tab.id)}
+              type="button"
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      {activeParserTab === "templates" ? (
+        <section className="space-y-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-headline text-2xl font-bold text-on-background">
+                Regex Templates
+              </h3>
+              <p className="mt-1 text-sm text-on-surface-variant">
+                Grouped by sender family with primary, draft, and fallback states.
+              </p>
+            </div>
+            <button
+              className={`flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary shadow-md transition-transform active:scale-95 ${pressableClass}`}
+              onClick={() => setIsTemplateBuilderOpen(true)}
+              type="button"
+            >
+              <MaterialSymbol className="text-sm" name="add" />
+              Add Template
+            </button>
           </div>
-          <div className="space-y-3">
-            {[
-              {
-                token: "\\d+",
-                title: "One or more digits",
-                detail: "Matches numbers like 1, 45, or 100.",
-              },
-              {
-                token: "(.*?)",
-                title: "Non-greedy match anything",
-                detail: "Captures text until the next pattern matches.",
-              },
-              {
-                token: "\\s*",
-                title: "Zero or more spaces",
-                detail: "Handles variable whitespace between words or symbols.",
-              },
-              {
-                token: "(?:...)",
-                title: "Non-capturing group",
-                detail: "Groups tokens together without extracting them.",
-              },
-            ].map((item) => (
-              <article
-                className="flex gap-3 rounded-lg border border-outline-variant/30 bg-surface-container-lowest p-3"
-                key={item.token}
-              >
-                <code className="h-fit rounded bg-primary-fixed/30 px-2 py-1 font-mono text-primary">
-                  {item.token}
-                </code>
-                <div>
-                  <p className="text-sm font-semibold text-on-surface">
-                    {item.title}
-                  </p>
-                  <p className="mt-1 text-xs text-on-surface-variant">
-                    {item.detail}
-                  </p>
+
+          <div className="space-y-6">
+            {groupedTemplates.map(([groupKey, group]) => (
+              <div className="space-y-3" key={groupKey}>
+                <div className="flex items-center gap-2 px-1 text-on-surface-variant">
+                  <MaterialSymbol className="text-lg" name={group.icon} />
+                  <span className="text-xs font-bold uppercase tracking-widest">
+                    {group.label}
+                  </span>
                 </div>
-              </article>
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  {group.templates.map((template) => {
+                    const matches = approvedTransactions.filter(
+                      (transaction) => transaction.parserTemplateId === template.id,
+                    ).length;
+                    const statusClass =
+                      template.status === "active"
+                        ? "bg-primary/10 text-primary"
+                        : template.status === "draft"
+                          ? "bg-tertiary/10 text-tertiary"
+                          : template.status === "fallback"
+                            ? "bg-stone-200 text-stone-600"
+                            : "bg-error/10 text-error";
+
+                    return (
+                      <button
+                        className={`rounded-xl border p-5 text-left shadow-sm transition-shadow ${
+                          selectedTemplate?.id === template.id
+                            ? "border-primary/40 bg-surface shadow-md"
+                            : "border-outline-variant/20 bg-surface-container-low hover:shadow-md"
+                        } ${pressableClass}`}
+                        key={template.id}
+                        onClick={() => setSelectedTemplateId(template.id)}
+                        type="button"
+                      >
+                        <div className="mb-4 flex items-start justify-between gap-4">
+                          <div>
+                            <h4 className="text-lg font-bold text-on-surface">
+                              {template.name}
+                            </h4>
+                            <p className="mt-1 text-xs text-on-surface-variant">
+                              {template.version} • {template.updated}
+                            </p>
+                          </div>
+                          <span
+                            className={`rounded px-2 py-1 text-[10px] font-bold uppercase tracking-tight ${statusClass}`}
+                          >
+                            {template.status}
+                          </span>
+                        </div>
+                        <div className="mb-4 flex gap-4">
+                          <div className="flex-1">
+                            <p className="text-[10px] font-bold uppercase text-on-surface-variant">
+                              Matches
+                            </p>
+                            <p className="font-headline text-lg font-semibold text-on-surface">
+                              {matches}
+                            </p>
+                          </div>
+                          <div className="flex-1">
+                            <p className="text-[10px] font-bold uppercase text-on-surface-variant">
+                              Success
+                            </p>
+                            <p className="font-headline text-lg font-semibold text-primary">
+                              {template.healthScore ? `${template.healthScore.toFixed(1)}%` : "--"}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="overflow-x-auto rounded-lg bg-stone-900 p-3 font-mono text-[11px] text-emerald-400/80">
+                          {template.regex}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             ))}
           </div>
+
+          <section className="overflow-hidden rounded-xl border border-outline-variant/30 bg-surface-container-low">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-outline-variant/30 bg-surface-container px-6 py-4">
+              <div>
+                <h3 className="font-headline text-lg font-semibold text-on-surface">
+                  Extraction Function
+                </h3>
+                <p className="mt-1 text-xs text-on-surface-variant">
+                  {selectedTemplate?.note ?? "Select a template to inspect its parsing shape."}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className={`rounded-full border border-outline-variant/30 bg-surface px-3 py-1.5 text-xs font-semibold text-primary ${pressableClass}`}
+                  onClick={handleDuplicateTemplate}
+                  type="button"
+                >
+                  Duplicate
+                </button>
+                <button
+                  className={`rounded-full border border-outline-variant/30 bg-surface px-3 py-1.5 text-xs font-semibold text-primary ${pressableClass}`}
+                  onClick={handlePrimaryTemplate}
+                  type="button"
+                >
+                  Make primary
+                </button>
+                <button
+                  className={`rounded-full border border-outline-variant/30 bg-surface px-3 py-1.5 text-xs font-semibold text-primary ${pressableClass}`}
+                  onClick={handleFallbackTemplate}
+                  type="button"
+                >
+                  Make fallback
+                </button>
+                <button
+                  className={`rounded-full border border-outline-variant/30 bg-surface px-3 py-1.5 text-xs font-semibold text-primary ${pressableClass}`}
+                  onClick={handleToggleTemplateState}
+                  type="button"
+                >
+                  {selectedTemplate?.status === "disabled" ? "Enable" : "Disable"}
+                </button>
+                <button
+                  className={`rounded-full border border-outline-variant/30 bg-surface px-3 py-1.5 text-xs font-semibold text-primary ${pressableClass}`}
+                  onClick={() => setIsFocusedEditorOpen(true)}
+                  type="button"
+                >
+                  Focus editor
+                </button>
+                <span className="rounded bg-surface-container-highest px-2 py-1 font-mono text-xs text-on-surface-variant">
+                  JavaScript
+                </span>
+              </div>
+            </div>
+            <div className="overflow-x-auto bg-[#2e3230] p-4 font-mono text-sm leading-relaxed text-[#eae6de]">
+              <pre>
+                <code>{parserSource}</code>
+              </pre>
+            </div>
+          </section>
         </section>
-      </div>
+      ) : null}
+
+      {activeParserTab === "sandbox" ? (
+        <section className="space-y-6">
+          <div className="grid gap-6 md:grid-cols-2">
+            <section className="space-y-4 rounded-xl border border-outline-variant/30 bg-surface-container p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
+              <div className="flex items-center gap-2">
+                <MaterialSymbol className="text-primary" name="science" />
+                <h3 className="font-headline text-xl font-semibold text-on-surface">
+                  Sandbox
+                </h3>
+              </div>
+              <label className="block">
+                <span className="mb-2 block text-xs font-bold uppercase text-on-surface-variant">
+                  Message source
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    { id: "latest", label: "Latest captured" },
+                    { id: "manual", label: "Paste manually" },
+                  ] as const).map((mode) => (
+                    <button
+                      className={`rounded-full px-3 py-2 text-xs font-semibold transition ${pressableClass} ${
+                        sandboxInputMode === mode.id
+                          ? "bg-primary text-on-primary"
+                          : "bg-surface text-on-surface-variant"
+                      }`}
+                      key={mode.id}
+                      onClick={() => {
+                        setSandboxInputMode(mode.id);
+                        if (mode.id === "latest") {
+                          setRawInput(latestCapturedMessage);
+                        }
+                      }}
+                      type="button"
+                    >
+                      {mode.label}
+                    </button>
+                  ))}
+                </div>
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-xs font-bold uppercase text-on-surface-variant">
+                  Sender family
+                </span>
+                <select
+                  className="w-full rounded-lg border-none bg-surface-container-lowest px-3 py-3 text-on-surface focus:ring-2 focus:ring-primary"
+                  onChange={(event) => setSenderLabel(event.target.value)}
+                  value={senderLabel}
+                >
+                  {parserSenderOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-xs font-bold uppercase text-on-surface-variant">
+                  Paste sample SMS
+                </span>
+                <textarea
+                  className="h-32 w-full resize-none rounded-lg border-none bg-surface-container-lowest p-3 text-sm text-on-surface focus:ring-2 focus:ring-primary"
+                  onChange={(event) => setRawInput(event.target.value)}
+                  placeholder="Paste a real bank SMS here..."
+                  rows={6}
+                  value={rawInput}
+                />
+              </label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <button
+                  className={`min-h-12 rounded-xl bg-tertiary px-4 py-3 text-sm font-bold text-on-tertiary shadow-md transition-all hover:opacity-90 active:scale-[0.98] ${pressableClass}`}
+                  onClick={handleSandboxTest}
+                  type="button"
+                >
+                  Run Test
+                </button>
+                <ActionStatusButton
+                  actionState={queueState}
+                  className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-on-primary"
+                  doneLabel="Queued"
+                  idleLabel="Queue to Inbox"
+                  onClick={handleQueue}
+                  workingLabel="Queueing..."
+                />
+              </div>
+              <p className="text-xs leading-5 text-on-surface-variant">{feedback}</p>
+            </section>
+
+            <section className="space-y-4 rounded-xl border border-emerald-900/30 bg-[#2e3230] p-5 shadow-lg">
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-2 font-mono text-xs text-emerald-400">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                  {previewResult.status === "matched"
+                    ? "PARSED_RESULT: SUCCESS"
+                    : "PARSED_RESULT: UNMATCHED"}
+                </span>
+                <span className="font-mono text-[10px] text-stone-500">
+                  ms: {previewResult.status === "matched" ? "14.2" : "11.4"}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-y-4 font-mono">
+                <div>
+                  <p className="text-[10px] uppercase text-emerald-400/40">Field</p>
+                  {previewRows.map(([field]) => (
+                    <p className="text-sm text-stone-300" key={field}>
+                      {field}
+                    </p>
+                  ))}
+                </div>
+                <div>
+                  <p className="text-right text-[10px] uppercase text-emerald-400/40">
+                    Value
+                  </p>
+                  {previewRows.map(([field, value]) => (
+                    <p className="text-right text-sm text-emerald-400" key={field}>
+                      {value}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <section className="rounded-xl border border-outline-variant/20 bg-surface-container p-6">
+            <div className="mb-4 flex items-center gap-2">
+              <MaterialSymbol className="text-secondary" name="menu_book" />
+              <h3 className="font-headline text-lg font-semibold text-on-surface">
+                Quick Reference
+              </h3>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              {[
+                {
+                  token: "(?<amount>...)",
+                  title: "Named capture groups",
+                  detail: "Best path for amount, merchant, balance, and account mapping.",
+                },
+                {
+                  token: "\\d+[\\d,]*\\.\\d{2}",
+                  title: "Money capture",
+                  detail: "Handles ETB values with commas and decimals.",
+                },
+                {
+                  token: "(?:Bal|balance)\\s(?<balance>...)",
+                  title: "Reported balance",
+                  detail: "Capture the bank-reported remaining balance for reconciliation.",
+                },
+                {
+                  token: "(?<merchant>.*?)",
+                  title: "Merchant capture",
+                  detail: "Use a non-greedy merchant capture before a balance or reference anchor.",
+                },
+              ].map((item) => (
+                <article
+                  className="flex gap-3 rounded-lg border border-outline-variant/30 bg-surface-container-lowest p-3"
+                  key={item.token}
+                >
+                  <code className="h-fit rounded bg-primary-fixed/30 px-2 py-1 font-mono text-primary">
+                    {item.token}
+                  </code>
+                  <div>
+                    <p className="text-sm font-semibold text-on-surface">
+                      {item.title}
+                    </p>
+                    <p className="mt-1 text-xs text-on-surface-variant">
+                      {item.detail}
+                    </p>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        </section>
+      ) : null}
+
+      {activeParserTab === "diagnostics" ? (
+        <section className="space-y-6">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <div className="rounded-xl bg-surface-container-high p-4">
+              <p className="text-[10px] font-bold uppercase text-on-surface-variant">
+                Unmatched
+              </p>
+              <p className="font-headline text-3xl font-bold text-error">
+                {unmatchedMessages.length}
+              </p>
+              <p className="mt-1 text-[10px] text-on-surface-variant">
+                Parser error queue
+              </p>
+            </div>
+            <div className="rounded-xl bg-surface-container-high p-4">
+              <p className="text-[10px] font-bold uppercase text-on-surface-variant">
+                Parser Drift
+              </p>
+              <p className="font-headline text-3xl font-bold text-tertiary">
+                {driftLabel}
+              </p>
+              <p className="mt-1 text-[10px] text-on-surface-variant">
+                {driftConfidence}% confidence
+              </p>
+            </div>
+            <div className="rounded-xl bg-surface-container-high p-4">
+              <p className="text-[10px] font-bold uppercase text-on-surface-variant">
+                Active
+              </p>
+              <p className="font-headline text-3xl font-bold text-primary">
+                {activeTemplateCount}
+              </p>
+              <p className="mt-1 text-[10px] text-on-surface-variant">
+                Live routes
+              </p>
+            </div>
+            <div className="rounded-xl bg-surface-container-high p-4">
+              <p className="text-[10px] font-bold uppercase text-on-surface-variant">
+                Queue
+              </p>
+              <p className="font-headline text-3xl font-bold text-primary">
+                {approvalQueue.length}
+              </p>
+              <p className="mt-1 text-[10px] text-on-surface-variant">
+                Ready for review
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-xl bg-surface-container p-5">
+            <h3 className="text-sm font-bold text-on-surface">
+              Bank Coverage Progress
+            </h3>
+            <div className="mt-4 space-y-3">
+              <div>
+                <div className="mb-1 flex justify-between text-[11px]">
+                  <span className="font-semibold">Supported sender families</span>
+                  <span className="font-bold text-primary">
+                    {Math.round((bankCoveragePercent / 100) * parserSenderOptions.length)}/
+                    {parserSenderOptions.length}
+                  </span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-stone-200">
+                  <div
+                    className="h-full bg-primary"
+                    style={{ width: `${bankCoveragePercent}%` }}
+                  />
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 flex justify-between text-[11px]">
+                  <span className="font-semibold">Core parser health</span>
+                  <span className="font-bold text-primary">{driftConfidence}%</span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-stone-200">
+                  <div
+                    className="h-full bg-primary"
+                    style={{ width: `${driftConfidence}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-4 rounded-xl border border-error/10 bg-error/5 p-4">
+            <MaterialSymbol
+              className="text-error"
+              filled
+              name="warning"
+            />
+            <div>
+              <h4 className="text-sm font-bold text-error">Parser Alert</h4>
+              <p className="mt-1 text-xs leading-relaxed text-on-surface-variant">
+                {recentParserAlert
+                  ? `${recentParserAlert.senderLabel} is producing unmatched messages. Latest reason: ${recentParserAlert.failureReason}.`
+                  : "No live parser alerts right now. Recent unmatched messages will appear here."}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
+            <div className="rounded-xl border border-outline-variant/10 bg-surface-container p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)] md:col-span-8">
+              <div className="mb-6 flex items-center gap-3">
+                <MaterialSymbol className="text-3xl text-primary" name="database" />
+                <h3 className="text-xl text-on-surface">Parser Data</h3>
+              </div>
+              <div className="space-y-4">
+                <button
+                  className={`flex w-full items-center justify-between rounded-lg border border-outline-variant/20 bg-surface p-4 text-left transition-colors hover:border-primary/30 ${pressableClass}`}
+                  onClick={downloadParserPack}
+                  type="button"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="rounded-full bg-primary/10 p-3 text-primary">
+                      <MaterialSymbol name="upload_file" />
+                    </div>
+                    <div>
+                      <p className="font-bold text-on-surface">Export Parser Pack</p>
+                      <p className="text-sm text-on-surface-variant">
+                        Download templates and parser-control settings.
+                      </p>
+                    </div>
+                  </div>
+                  <MaterialSymbol className="text-on-surface-variant" name="chevron_right" />
+                </button>
+                <button
+                  className={`flex w-full items-center justify-between rounded-lg border border-outline-variant/20 bg-surface p-4 text-left transition-colors hover:border-primary/30 ${pressableClass}`}
+                  onClick={() => parserPackInputRef.current?.click()}
+                  type="button"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="rounded-full bg-primary/10 p-3 text-primary">
+                      <MaterialSymbol name="extension" />
+                    </div>
+                    <div>
+                      <p className="font-bold text-on-surface">Import Parser Pack</p>
+                      <p className="text-sm text-on-surface-variant">
+                        Replace the local parser preview pack from JSON.
+                      </p>
+                    </div>
+                  </div>
+                  <MaterialSymbol className="text-on-surface-variant" name="chevron_right" />
+                </button>
+                <button
+                  className={`flex w-full items-center justify-between rounded-lg border border-error/20 bg-error-container/20 p-4 text-left transition-colors hover:bg-error-container/40 ${pressableClass}`}
+                  onClick={handlePurgeParserCache}
+                  type="button"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="rounded-full bg-error/10 p-3 text-error">
+                      <MaterialSymbol name="auto_delete" />
+                    </div>
+                    <div>
+                      <p className="font-bold text-error">Purge Local Cache</p>
+                      <p className="text-sm text-on-error-container">
+                        Reset local parser templates and temporary preview state.
+                      </p>
+                    </div>
+                  </div>
+                  <MaterialSymbol className="text-error" name="warning" />
+                </button>
+              </div>
+            </div>
+
+            <div className="relative flex min-h-[300px] flex-col justify-end overflow-hidden rounded-xl bg-tertiary-fixed p-6 md:col-span-4">
+              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(74,124,89,0.16),transparent_40%)]" />
+              <div className="relative z-10">
+                <p className="font-headline text-2xl font-bold text-on-tertiary-fixed">
+                  {driftConfidence}% Health
+                </p>
+                <p className="mb-4 text-sm text-on-tertiary-fixed-variant">
+                  Template coverage, drift, and parser-review queues are within a safe range.
+                </p>
+                <div className="h-2 w-full overflow-hidden rounded-full bg-white/30">
+                  <div
+                    className="h-full bg-primary"
+                    style={{ width: `${driftConfidence}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-outline-variant/10 bg-surface-container p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)] md:col-span-6">
+              <div className="mb-6 flex items-center gap-3">
+                <MaterialSymbol className="text-3xl text-primary" name="verified_user" />
+                <h3 className="text-xl text-on-surface">Data Integrity</h3>
+              </div>
+              <div className="space-y-6">
+                {[
+                  {
+                    label: "Strict Schema Parsing",
+                    detail: "Reject any SMS that does not fully match a trusted route.",
+                    checked: strictSchemaParsing,
+                    onToggle: () => setStrictSchemaParsing((current) => !current),
+                  },
+                  {
+                    label: "Preserve Raw SMS",
+                    detail: "Store original SMS text alongside parsed transaction drafts.",
+                    checked: preserveRawSms,
+                    onToggle: () => setPreserveRawSms((current) => !current),
+                  },
+                  {
+                    label: "Auto-Reconciliation",
+                    detail: "Prepare matched messages for later balance reconciliation.",
+                    checked: autoReconciliation,
+                    onToggle: () => setAutoReconciliation((current) => !current),
+                  },
+                ].map((toggle) => (
+                  <div className="flex items-center justify-between" key={toggle.label}>
+                    <div className="flex-1 pr-4">
+                      <p className="font-bold text-on-surface">{toggle.label}</p>
+                      <p className="text-sm text-on-surface-variant">{toggle.detail}</p>
+                    </div>
+                    <SwitchButton
+                      ariaLabel={toggle.label}
+                      checked={toggle.checked}
+                      onToggle={toggle.onToggle}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-outline-variant/10 bg-surface-container p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)] md:col-span-6">
+              <div className="mb-6 flex items-center gap-3">
+                <MaterialSymbol className="text-3xl text-primary" name="terminal" />
+                <h3 className="text-xl text-on-surface">Logging</h3>
+              </div>
+              <div className="space-y-8">
+                <div className="flex items-center justify-between">
+                  <div className="flex-1 pr-4">
+                    <p className="font-bold text-on-surface">Verbose Debug Logging</p>
+                    <p className="text-sm text-on-surface-variant">
+                      Record granular parsing details for diagnostics and template tuning.
+                    </p>
+                  </div>
+                  <SwitchButton
+                    ariaLabel="Verbose Debug Logging"
+                    checked={verboseLogging}
+                    onToggle={() => setVerboseLogging((current) => !current)}
+                  />
+                </div>
+                <div className="h-px border-t border-outline-variant/20" />
+                <button
+                  className={`flex w-full items-center justify-between text-left ${pressableClass}`}
+                  onClick={() =>
+                    showParserStatus(
+                      `Latest system snapshot: ${unmatchedMessages.length} parser errors, ${approvalQueue.length} queued drafts, ${activeTemplateCount} active templates.`,
+                      "success",
+                    )
+                  }
+                  type="button"
+                >
+                  <div>
+                    <p className="font-bold text-primary">View System Logs</p>
+                    <p className="text-sm text-on-surface-variant">
+                      Inspect recent parser attempts, queue transfers, and unmatched events.
+                    </p>
+                  </div>
+                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-primary">
+                    <MaterialSymbol name="open_in_new" />
+                  </div>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      <button
+        className={`fixed bottom-28 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-primary text-on-primary shadow-lg transition-transform hover:scale-105 active:scale-95 ${pressableClass}`}
+        onClick={() => setIsFocusedEditorOpen(true)}
+        type="button"
+      >
+        <MaterialSymbol className="text-3xl" name="terminal" />
+      </button>
+
+      {isTemplateBuilderOpen ? (
+        <OverlayPanel
+          onClose={() => setIsTemplateBuilderOpen(false)}
+          subtitle="Quick mobile creation for emergency parser cases."
+          title="Create Template"
+        >
+          <section className="space-y-5">
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Sender family
+                </span>
+                <select
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface focus:border-primary focus:ring-1 focus:ring-primary"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      sender: event.target.value,
+                    }))
+                  }
+                  value={templateBuilderDraft.sender}
+                >
+                  {parserSenderOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Template name
+                </span>
+                <input
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface focus:border-primary focus:ring-1 focus:ring-primary"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      name: event.target.value,
+                    }))
+                  }
+                  type="text"
+                  value={templateBuilderDraft.name}
+                />
+              </label>
+            </div>
+            <label className="block">
+              <span className="mb-2 block text-sm font-semibold text-on-surface">
+                Regex
+              </span>
+              <textarea
+                className="h-32 w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 font-mono text-sm text-on-surface focus:border-primary focus:ring-1 focus:ring-primary"
+                onChange={(event) =>
+                  setTemplateBuilderDraft((current) => ({
+                    ...current,
+                    regex: event.target.value,
+                  }))
+                }
+                value={templateBuilderDraft.regex}
+              />
+            </label>
+            <div className="grid gap-4 md:grid-cols-3">
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Direction
+                </span>
+                <select
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      direction: event.target.value,
+                    }))
+                  }
+                  value={templateBuilderDraft.direction}
+                >
+                  <option value="debit">Debit</option>
+                  <option value="credit">Credit</option>
+                  <option value="transfer">Transfer</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Amount key
+                </span>
+                <input
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      amountKey: event.target.value,
+                    }))
+                  }
+                  type="text"
+                  value={templateBuilderDraft.amountKey}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Merchant key
+                </span>
+                <input
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      merchantKey: event.target.value,
+                    }))
+                  }
+                  type="text"
+                  value={templateBuilderDraft.merchantKey}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Balance key
+                </span>
+                <input
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      balanceKey: event.target.value,
+                    }))
+                  }
+                  type="text"
+                  value={templateBuilderDraft.balanceKey}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Fee key
+                </span>
+                <input
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      feeKey: event.target.value,
+                    }))
+                  }
+                  type="text"
+                  value={templateBuilderDraft.feeKey}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  VAT key
+                </span>
+                <input
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      vatKey: event.target.value,
+                    }))
+                  }
+                  type="text"
+                  value={templateBuilderDraft.vatKey}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Account key
+                </span>
+                <input
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      accountKey: event.target.value,
+                    }))
+                  }
+                  type="text"
+                  value={templateBuilderDraft.accountKey}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Date mode
+                </span>
+                <select
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      dateMode: event.target.value,
+                    }))
+                  }
+                  value={templateBuilderDraft.dateMode}
+                >
+                  <option value="message_date">Use message date</option>
+                  <option value="captured_at">Use captured timestamp</option>
+                </select>
+              </label>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                className={`rounded-2xl border border-outline-variant/20 bg-surface px-4 py-3 text-sm font-semibold text-on-surface ${pressableClass}`}
+                onClick={() => setIsTemplateBuilderOpen(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className={`rounded-2xl bg-primary px-4 py-3 text-sm font-semibold text-on-primary ${pressableClass}`}
+                onClick={handleCreateTemplate}
+                type="button"
+              >
+                Create draft template
+              </button>
+            </div>
+          </section>
+        </OverlayPanel>
+      ) : null}
 
       {isFocusedEditorOpen ? (
         <OverlayPanel
           onClose={() => setIsFocusedEditorOpen(false)}
-          subtitle="Use a larger editing surface when adjusting templates, regexes, or extraction notes."
-          title="Focused parser editor"
+          subtitle={selectedTemplate?.note ?? "Focused editor"}
+          title={selectedTemplate?.name ?? "Focused editor"}
         >
-          <div className="grid gap-6 lg:grid-cols-[1.25fr_0.75fr]">
-            <section className="overflow-hidden rounded-[24px] border border-outline-variant/20 bg-[#2e3230]">
-              <div className="border-b border-white/10 px-5 py-3 text-sm text-[#c8e8d0]">
-                Template source
-              </div>
-              <pre className="overflow-x-auto p-5 font-mono text-sm leading-7 text-[#eae6de]">
+          <section className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+              <StatusChip icon="rule" tone="success">
+                {selectedTemplate?.status ?? "draft"}
+              </StatusChip>
+              <StatusChip icon="history" tone="neutral">
+                {selectedTemplate?.version ?? "v0.0.0"}
+              </StatusChip>
+              <StatusChip icon="account_balance_wallet" tone="neutral">
+                {selectedTemplate?.institutionLabel ?? "Unknown sender"}
+              </StatusChip>
+            </div>
+            <section className="min-h-[72vh] overflow-hidden rounded-[24px] border border-outline-variant/20 bg-[#2e3230]">
+              <pre className="h-full overflow-auto p-5 font-mono text-sm leading-7 text-[#eae6de]">
                 <code>{parserSource}</code>
               </pre>
             </section>
-            <section className="space-y-4 rounded-[24px] border border-outline-variant/20 bg-surface-container-low p-5">
-              <div>
-                <p className="text-sm font-semibold text-on-surface">
-                  Working notes
-                </p>
-                <p className="mt-2 text-sm leading-6 text-on-surface-variant">
-                  Keep the parser strict enough to avoid false positives. If a
-                  message is uncertain, let Inbox review catch it instead of
-                  force-writing the ledger.
-                </p>
-              </div>
-              <textarea
-                className="min-h-56 w-full rounded-2xl border border-outline-variant/30 bg-surface px-4 py-3 text-sm text-on-surface focus:border-primary focus:ring-1 focus:ring-primary"
-                onChange={(event) => setRawInput(event.target.value)}
-                value={rawInput}
-              />
-              <ActionStatusButton
-                actionState={saveState}
-                className="inline-flex min-h-11 items-center gap-2 rounded-2xl bg-primary px-4 py-2.5 font-semibold text-on-primary"
-                doneLabel="Saved"
-                idleLabel="Save template notes"
-                onClick={handleSave}
-                workingLabel="Saving..."
-              />
-            </section>
-          </div>
+          </section>
         </OverlayPanel>
       ) : null}
     </section>
@@ -1327,7 +2977,7 @@ function ForwardingPage() {
           Message Routing
         </h2>
         <p className="max-w-2xl text-sm leading-6 text-on-surface-variant">
-          Route incoming bank notifications toward your trusted desktop authority
+          Route incoming bank notifications toward your desktop review route
           or a fallback phone path.
         </p>
       </header>
@@ -1351,8 +3001,8 @@ function ForwardingPage() {
               />
             </div>
             <p className="text-sm leading-6 text-on-surface-variant">
-              Automatically push incoming SMS into the trusted desktop review
-              authority when both devices share the same local network.
+              Automatically push incoming SMS into your desktop review route
+              when both devices share the same local network.
             </p>
             <div className="space-y-3">
               <label className="ml-1 block text-sm font-semibold text-on-surface">
@@ -1495,17 +3145,14 @@ function HelpPage() {
   );
 
   const filteredFaqs = helpFeaturedFaqs.filter((item) =>
-    `${item.question} ${item.answer}`
+    `${item.question} ${item.summary} ${item.answer} ${item.tag}`
       .toLowerCase()
       .includes(normalizedQuery),
   );
 
   return (
     <section className="space-y-12">
-      <section className="mx-auto max-w-2xl space-y-6 text-center">
-        <h2 className="font-headline text-3xl font-bold text-on-background md:text-4xl">
-          How can we help?
-        </h2>
+      <MotionPanel className="mx-auto max-w-2xl space-y-6 text-center">
         <div className="relative">
           <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-4">
             <MaterialSymbol className="text-outline" name="search" />
@@ -1518,16 +3165,27 @@ function HelpPage() {
             value={query}
           />
         </div>
-      </section>
+      </MotionPanel>
 
-      <section>
-        <h3 className="mb-6 font-headline text-xl font-bold text-on-background">
-          Browse Categories
-        </h3>
-        <div className="grid gap-4 sm:grid-cols-2">
+      <MotionPanel className="space-y-5" delay={40}>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="font-headline text-xl font-bold text-on-background">
+              Track Wallet Help Center
+            </h3>
+            <p className="mt-1 text-sm text-on-surface-variant">
+              Each section stays in-app and calls out where the mobile build is
+              fully live versus still staged.
+            </p>
+          </div>
+          <StatusChip icon="lock_clock" tone="neutral">
+            No external site required
+          </StatusChip>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {filteredCategories.map((item) => (
             <button
-              className="rounded-xl bg-surface-container p-6 text-left transition hover:bg-surface-container-high active:scale-[0.99]"
+              className={`rounded-[24px] border border-outline-variant/20 bg-surface-container p-6 text-left shadow-[0_4px_18px_rgba(46,50,48,0.05)] hover:bg-surface-container-high ${pressableClass}`}
               key={item.title}
               onClick={() => setActiveGuide(item)}
               type="button"
@@ -1538,7 +3196,7 @@ function HelpPage() {
                 >
                   <MaterialSymbol name={item.icon} />
                 </div>
-                <MaterialSymbol className="text-outline-variant" name="open_in_new" />
+                <StatusChip tone="neutral">{item.statusLabel}</StatusChip>
               </div>
               <h4 className="mt-4 font-headline text-lg font-bold text-on-background">
                 {item.title}
@@ -1546,22 +3204,27 @@ function HelpPage() {
               <p className="mt-1 text-sm leading-relaxed text-on-surface-variant">
                 {item.detail}
               </p>
-              <div className="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-primary">
-                Open guide
-                <MaterialSymbol className="text-[18px]" name="arrow_forward" />
+              <div className="mt-4 flex items-center justify-between gap-3">
+                <span className="text-xs font-semibold uppercase tracking-[0.12em] text-on-surface-variant">
+                  {item.sections.length} sections
+                </span>
+                <span className="inline-flex items-center gap-2 text-sm font-semibold text-primary">
+                  Open guide
+                  <MaterialSymbol className="text-[18px]" name="arrow_forward" />
+                </span>
               </div>
             </button>
           ))}
           {filteredCategories.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-outline-variant bg-surface-container-low p-5 text-sm text-on-surface-variant sm:col-span-2">
+            <div className="rounded-xl border border-dashed border-outline-variant bg-surface-container-low p-5 text-sm text-on-surface-variant sm:col-span-2 xl:col-span-3">
               No documentation category matches that search yet. Try SMS,
               parser, security, or devices.
             </div>
           ) : null}
         </div>
-      </section>
+      </MotionPanel>
 
-      <section className="space-y-6">
+      <MotionPanel className="space-y-6" delay={90}>
         <h3 className="font-headline text-xl font-bold text-on-background">
           Featured Articles
         </h3>
@@ -1575,7 +3238,7 @@ function HelpPage() {
                 key={item.id}
               >
                 <button
-                  className="flex w-full items-center gap-4 text-left"
+                  className={`flex w-full items-center gap-4 text-left ${pressableClass}`}
                   onClick={() =>
                     setExpandedFaqId((current) =>
                       current === item.id ? null : item.id,
@@ -1587,12 +3250,14 @@ function HelpPage() {
                     <MaterialSymbol name="article" />
                   </div>
                   <div className="flex-1">
+                    <div className="mb-2">
+                      <StatusChip tone="neutral">{item.tag}</StatusChip>
+                    </div>
                     <h4 className="font-headline font-semibold text-on-background">
                       {item.question}
                     </h4>
                     <p className="mt-1 text-sm text-on-surface-variant">
-                      Common setup and trust questions for this mobile-first
-                      finance workflow.
+                      {item.summary}
                     </p>
                   </div>
                   <MaterialSymbol
@@ -1617,7 +3282,7 @@ function HelpPage() {
             </div>
           ) : null}
         </div>
-      </section>
+      </MotionPanel>
 
       {activeGuide ? (
         <OverlayPanel
@@ -1625,34 +3290,83 @@ function HelpPage() {
           subtitle={activeGuide.detail}
           title={activeGuide.title}
         >
+          <div className="mb-5 flex items-center justify-between gap-3 rounded-[24px] border border-outline-variant/20 bg-surface-container-low p-5">
+            <div>
+              <p className="text-sm font-semibold text-on-surface">
+                Guide readiness
+              </p>
+              <p className="mt-1 text-sm leading-6 text-on-surface-variant">
+                This guide marks which sections are fully available in the
+                mobile app and which deeper flows still depend on backend or
+                native wiring.
+              </p>
+            </div>
+            <StatusChip icon="task_alt" tone="neutral">
+              {activeGuide.statusLabel}
+            </StatusChip>
+          </div>
           <div className="grid gap-4">
-            {activeGuide.sections.map((section) => (
-              <article
-                className="rounded-[24px] border border-outline-variant/20 bg-surface-container-low p-5"
-                key={section.title}
-              >
-                <h4 className="font-headline text-xl font-semibold text-on-surface">
-                  {section.title}
-                </h4>
-                <p className="mt-3 text-sm leading-6 text-on-surface-variant">
-                  {section.body}
-                </p>
-                {section.bullets?.length ? (
-                  <ul className="mt-4 space-y-2 text-sm text-on-surface-variant">
-                    {section.bullets.map((bullet) => (
-                      <li className="flex items-start gap-2" key={bullet}>
-                        <MaterialSymbol
-                          className="mt-0.5 text-[16px] text-primary"
-                          filled
-                          name="check_circle"
-                        />
-                        <span>{bullet}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </article>
-            ))}
+            {activeGuide.sections.map((section, index) => {
+              const isComingSoon = section.availability === "coming-soon";
+
+              return (
+                <MotionPanel
+                  className="rounded-[24px] border border-outline-variant/20 bg-surface-container-low p-5"
+                  delay={index * 60}
+                  key={section.title}
+                  variant="subtle"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <h4 className="font-headline text-xl font-semibold text-on-surface">
+                      {section.title}
+                    </h4>
+                    <StatusChip
+                      icon={isComingSoon ? "schedule" : "check_circle"}
+                      tone={isComingSoon ? "warning" : "success"}
+                    >
+                      {isComingSoon ? "Coming soon" : "Available now"}
+                    </StatusChip>
+                  </div>
+                  <div className={isComingSoon ? "relative mt-3 overflow-hidden rounded-[20px]" : "mt-3"}>
+                    <div
+                      className={
+                        isComingSoon
+                          ? "rounded-[20px] bg-surface p-4 blur-[3px] opacity-45 select-none"
+                          : "rounded-[20px] bg-surface p-4"
+                      }
+                    >
+                      <p className="text-sm leading-6 text-on-surface-variant">
+                        {section.body}
+                      </p>
+                      {section.bullets?.length ? (
+                        <ul className="mt-4 space-y-2 text-sm text-on-surface-variant">
+                          {section.bullets.map((bullet) => (
+                            <li className="flex items-start gap-2" key={bullet}>
+                              <MaterialSymbol
+                                className="mt-0.5 text-[16px] text-primary"
+                                filled
+                                name="check_circle"
+                              />
+                              <span>{bullet}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                    {isComingSoon ? (
+                      <div className="absolute inset-0 flex flex-col items-start justify-end bg-[linear-gradient(180deg,rgba(248,245,239,0.1),rgba(248,245,239,0.92))] p-4">
+                        <StatusChip icon="schedule" tone="warning">
+                          Coming soon
+                        </StatusChip>
+                        <p className="mt-3 text-sm leading-6 text-on-surface">
+                          {section.previewNote}
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
+                </MotionPanel>
+              );
+            })}
           </div>
         </OverlayPanel>
       ) : null}
@@ -1694,7 +3408,7 @@ function ConnectDevicePage({
       ? `Current pairing window expires in about ${remainingMinutes} minute${
           remainingMinutes === 1 ? "" : "s"
         }.`
-      : "Current pairing window expired. Generate a fresh code from the desktop authority.";
+      : "Current pairing window expired. Generate a fresh code from the source device.";
 
   useEffect(() => {
     const intervalId = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -1726,7 +3440,9 @@ function ConnectDevicePage({
       if (pairedDevice) {
         setManualConnectState("done");
         showConnectStatus(
-          `${pairedDevice.displayName} is now trusted and available in Sync.`,
+          pairedDevice.deviceId.startsWith("code-paired-")
+            ? `${pairedDevice.displayName} is now available as a local preview route in Sync.`
+            : `${pairedDevice.displayName} is now trusted and available in Sync.`,
           "success",
         );
         setTimeout(() => {
@@ -1771,7 +3487,7 @@ function ConnectDevicePage({
           Pair a New Device
         </h2>
         <p className="mt-2 text-sm text-on-surface-variant">
-          Securely connect a trusted desktop or nearby device to your wallet
+          Securely connect a nearby device or a local preview route to your wallet
           workspace.
         </p>
       </div>
@@ -1836,7 +3552,7 @@ function ConnectDevicePage({
               Enter Device Code
             </h3>
             <p className="text-sm text-on-surface-variant">
-              Type the 6-digit PIN displayed on the trusted desktop.
+              Type the 6-digit PIN displayed on the source device.
             </p>
           </div>
         </div>
@@ -2662,26 +4378,47 @@ export function SettingsDetailScreen({
   pageId,
   onOpenPage = () => undefined,
   onOpenTab = () => undefined,
+  orderedAccountIds = [],
 }: SettingsDetailScreenProps) {
+  let page: ReactNode;
+
   switch (pageId) {
     case "account":
-      return <ManageAccountPage />;
+      page = <ManageAccountPage />;
+      break;
     case "appearance":
-      return <AppearancePage />;
+      page = <AppearancePage orderedAccountIds={orderedAccountIds} />;
+      break;
     case "security":
-      return <SecurityPage />;
+      page = <SecurityPage />;
+      break;
+    case "dataStorage":
+      page = <DataStoragePage />;
+      break;
     case "parsing":
-      return <ParsingPage onOpenTab={onOpenTab} />;
+      page = <ParsingPage onOpenTab={onOpenTab} />;
+      break;
     case "forwarding":
-      return <ForwardingPage />;
+      page = <ForwardingPage />;
+      break;
     case "help":
-      return <HelpPage />;
+      page = <HelpPage />;
+      break;
     case "connect-device":
-      return <ConnectDevicePage onOpenPage={onOpenPage} />;
+      page = <ConnectDevicePage onOpenPage={onOpenPage} />;
+      break;
     case "sync":
-      return <SyncPage onOpenPage={onOpenPage} />;
+      page = <SyncPage onOpenPage={onOpenPage} />;
+      break;
     case "advanced":
     default:
-      return <AdvancedPage />;
+      page = <AdvancedPage />;
   }
+
+  return (
+    <>
+      <SettingsMotionStyles />
+      {page}
+    </>
+  );
 }
