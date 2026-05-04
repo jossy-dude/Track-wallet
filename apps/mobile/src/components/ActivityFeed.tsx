@@ -11,6 +11,7 @@ export interface ActivityFeedItem {
   icon: string
   tone: FinanceAccentTone
   metaLabel?: string
+  onIconPress?: () => void
 }
 
 interface ActivityFeedProps {
@@ -69,15 +70,30 @@ export function ActivityFeed({
                 key={item.id}
               >
                 <div className="flex min-w-0 items-center gap-3">
-                  <div
-                    className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${styles.badge}`}
-                  >
-                    <MaterialSymbol
-                      className={`text-[20px] ${styles.icon}`}
-                      filled
-                      name={item.icon}
-                    />
-                  </div>
+                  {item.onIconPress ? (
+                    <button
+                      aria-label={`Edit ${item.title}`}
+                      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${styles.badge} transition active:scale-[0.96]`}
+                      onClick={item.onIconPress}
+                      type="button"
+                    >
+                      <MaterialSymbol
+                        className={`text-[20px] ${styles.icon}`}
+                        filled
+                        name={item.icon}
+                      />
+                    </button>
+                  ) : (
+                    <div
+                      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${styles.badge}`}
+                    >
+                      <MaterialSymbol
+                        className={`text-[20px] ${styles.icon}`}
+                        filled
+                        name={item.icon}
+                      />
+                    </div>
+                  )}
                   <div className="min-w-0">
                     <div className="truncate text-sm font-semibold text-on-surface">
                       {item.title}

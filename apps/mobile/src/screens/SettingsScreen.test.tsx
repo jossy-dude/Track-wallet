@@ -23,12 +23,19 @@ describe("SettingsScreen", () => {
       />,
     );
 
-    expect(html).toContain("Settings Hub");
+    expect(html).toContain("Settings");
+    expect(html).toContain("This phone");
+    expect(html).toContain("Open local profile");
     expect(html).toContain("Appearance");
     expect(html).toContain("Security &amp; Privacy");
     expect(html).toContain("Sync &amp; Devices");
     expect(html).toContain("Parsing Engine");
-    expect(html).toContain("SMS Forwarding");
+    expect(html).toContain("SMS Capture &amp; Routing");
+    expect(html).toContain("System internals");
+    expect(html).toContain("Help and documentation");
+    expect(html).not.toContain("Advanced");
+    expect(html).not.toContain("Manage Account");
+    expect(html).not.toContain("SMS Forwarding");
     expect(html).not.toContain("Developer parser lab");
     expect(html).not.toContain("Settings and Sync Hub");
   });
@@ -71,7 +78,7 @@ describe("SettingsScreen", () => {
     });
   });
 
-  it("routes manage account through the settings detail system", () => {
+  it("routes the local profile hero button through the settings detail system", () => {
     document.body.innerHTML = "<div id=\"root\"></div>";
     const container = document.getElementById("root");
 
@@ -94,7 +101,7 @@ describe("SettingsScreen", () => {
 
     const buttons = Array.from(container.querySelectorAll("button"));
     const manageAccountButton = buttons.find((button: HTMLButtonElement) =>
-      button.textContent?.includes("Manage Account"),
+      button.textContent?.includes("Open local profile"),
     );
 
     expect(manageAccountButton).toBeDefined();

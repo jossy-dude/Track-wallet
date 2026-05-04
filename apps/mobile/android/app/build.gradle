@@ -1,0 +1,114 @@
+apply plugin: 'com.android.application'
+
+def readReleaseConfigValue = { propertyName, envName ->
+    def propertyValue = project.findProperty(propertyName)
+    if (propertyValue != null) {
+        def trimmedValue = propertyValue.toString().trim()
+        if (!trimmedValue.isEmpty()) {
+            return trimmedValue
+        }
+    }
+
+    def envValue = System.getenv(envName)
+    if (envValue != null) {
+        def trimmedValue = envValue.toString().trim()
+        if (!trimmedValue.isEmpty()) {
+            return trimmedValue
+        }
+    }
+
+    return null
+}
+
+def releaseSigningRequested = "true".equalsIgnoreCase(
+    readReleaseConfigValue('trackWalletReleaseSigningEnabled', 'TRACK_WALLET_RELEASE_SIGNING_ENABLED') ?: 'false'
+)
+
+def releaseSigningFields = [
+    [key: 'storeFile', property: 'trackWalletReleaseStoreFile', env: 'TRACK_WALLET_RELEASE_STORE_FILE'],
+    [key: 'storePassword', property: 'trackWalletReleaseStorePassword', env: 'TRACK_WALLET_RELEASE_STORE_PASSWORD'],
+    [key: 'keyAlias', property: 'trackWalletReleaseKeyAlias', env: 'TRACK_WALLET_RELEASE_KEY_ALIAS'],
+    [key: 'keyPassword', property: 'trackWalletReleaseKeyPassword', env: 'TRACK_WALLET_RELEASE_KEY_PASSWORD'],
+]
+
+def releaseSigningInputs = releaseSigningFields.collectEntries { field ->
+    [(field.key): readReleaseConfigValue(field.property, field.env)]
+}
+
+if (releaseSigningRequested) {
+    def missingReleaseSigningInputs = releaseSigningFields
+        .findAll { field -> releaseSigningInputs[field.key] == null }
+        .collect { field -> "${field.property} / ${field.env}" }
+
+    if (!missingReleaseSigningInputs.isEmpty()) {
+        throw new GradleException(
+            "Release signing was requested, but these signing inputs are missing: ${missingReleaseSigningInputs.join(', ')}"
+        )
+    }
+}
+
+android {
+    namespace "com.omnisync.mobile"
+    compileSdk rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.omnisync.mobile"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 2
+        versionName "0.1.0-alpha.1"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        if (releaseSigningRequested) {
+            release {
+                storeFile file(releaseSigningInputs.storeFile)
+                storePassword releaseSigningInputs.storePassword
+                keyAlias releaseSigningInputs.keyAlias
+                keyPassword releaseSigningInputs.keyPassword
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (releaseSigningRequested) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

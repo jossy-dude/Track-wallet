@@ -12,6 +12,10 @@
     "dev:mobile": "turbo run dev --filter=@omni-sync/mobile",
     "dev:desktop": "turbo run dev --filter=@omni-sync/desktop",
     "build": "turbo run build",
+    "ci:build:android:release": "npm run android:build:release -w @omni-sync/mobile",
+    "ci:build:mobile": "npm run build -w @omni-sync/mobile",
+    "ci:test": "npm run test -w @omni-sync/core && npm run test -w @omni-sync/database && npm run test -w @omni-sync/mobile",
+    "ci:typecheck": "turbo run typecheck --force",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run typecheck"

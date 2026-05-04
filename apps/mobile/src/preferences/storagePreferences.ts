@@ -60,7 +60,7 @@ export function readImportDuplicateModePreference(): HistoricalImportDuplicateMo
     return "skip";
   }
 
-  return value === "skip" ? "skip" : "skip";
+  return value === "review" ? "review" : "skip";
 }
 
 export function persistImportDuplicateModePreference(

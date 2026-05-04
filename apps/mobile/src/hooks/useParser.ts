@@ -4,6 +4,7 @@ import {
   parseIncomingSMS,
   parseSmsMessage,
   type ParserMatchResult,
+  type ParserRuntimeOptions,
   type RawSmsMessage,
 } from "@omni-sync/core";
 import { useTransactionStore } from "@omni-sync/database";
@@ -31,9 +32,24 @@ export interface UseParserResult {
   ) => QueuedParseResult | CapturedUnmatchedParseResult;
 }
 
+export interface UseParserOptions {
+  runtime?: ParserRuntimeOptions;
+  verboseLogging?: boolean;
+}
+
+function buildRedactedDebugPayload(message: RawSmsMessage) {
+  return {
+    messageId: message.messageId,
+    senderLabel: message.senderLabel,
+    receivedAt: message.receivedAt,
+    bodyLength: message.smsBody.length,
+  };
+}
+
 export function useParser(
   rawSmsBody = "",
   senderLabel = "manual-preview",
+  options: UseParserOptions = {},
 ): UseParserResult {
   const queueParsedTransaction = useTransactionStore(
     (state) => state.queueParsedTransaction,
@@ -49,8 +65,8 @@ export function useParser(
         senderLabel,
         smsBody: rawSmsBody,
         receivedAt: new Date().toISOString(),
-      }),
-    [rawSmsBody, senderLabel],
+      }, options.runtime),
+    [options.runtime, rawSmsBody, senderLabel],
   );
 
   function parseAndQueue(input: DebugSmsInput) {
@@ -61,9 +77,18 @@ export function useParser(
       receivedAt: new Date(input.timestamp_ms).toISOString(),
     };
 
-    const parseResult = parseIncomingSMS(rawSmsMessage);
-    console.log("[Parser] parseAndQueue input", rawSmsMessage);
-    console.log("[Parser] parseAndQueue result", parseResult);
+    const parseResult = parseIncomingSMS(rawSmsMessage, options.runtime);
+    if (options.verboseLogging) {
+      console.log(
+        "[Parser] parseAndQueue input",
+        buildRedactedDebugPayload(rawSmsMessage),
+      );
+      console.log("[Parser] parseAndQueue result", {
+        status: parseResult.status,
+        matchedTemplateId:
+          parseResult.status === "matched" ? parseResult.draft.parserTemplateId : null,
+      });
+    }
     if (parseResult.status !== "matched") {
       const unmatchedEntry = captureUnmatchedSms(
         rawSmsMessage,

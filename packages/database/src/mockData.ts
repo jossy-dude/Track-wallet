@@ -4,6 +4,10 @@ import type {
   ApprovedTransaction,
   BudgetSummary,
   ParsedTransactionDraft,
+  NearbySyncDevice,
+  PairingCodeState,
+  SyncActivityEntry,
+  TrustedSyncDevice,
 } from "@omni-sync/core";
 
 const BUDGET_LIMITS: Record<BudgetSummary["category"], number> = {
@@ -79,30 +83,33 @@ function createApprovedTransaction(
 
 export const demoAccountSummaries: AccountSummary[] = [
   {
-    accountId: "acct-cbe-4920",
+    accountId: "acct-cbe-2401",
     institutionName: "CBE",
-    maskedAccountNumber: "**** 4920",
-    balanceMinor: 845000,
+    maskedAccountNumber: "**** 2401",
+    fullAccountNumber: "0000 0000 2401",
+    balanceMinor: 640000,
     currencyCode: "ETB",
     channel: "bank",
     iconName: "account_balance",
     tone: "primary",
   },
   {
-    accountId: "acct-dashen-1104",
+    accountId: "acct-dashen-8805",
     institutionName: "Dashen Bank",
-    maskedAccountNumber: "**** 1104",
-    balanceMinor: 355000,
+    maskedAccountNumber: "**** 8805",
+    fullAccountNumber: "0000 0000 8805",
+    balanceMinor: 285000,
     currencyCode: "ETB",
     channel: "bank",
     iconName: "diamond",
     tone: "tertiary",
   },
   {
-    accountId: "acct-telebirr-0172",
+    accountId: "acct-telebirr-0042",
     institutionName: "Telebirr",
-    maskedAccountNumber: "**** 0172",
-    balanceMinor: 180000,
+    maskedAccountNumber: "**** 0042",
+    fullAccountNumber: "0900 0000 0042",
+    balanceMinor: 96000,
     currencyCode: "ETB",
     channel: "mobile_money",
     iconName: "phone_iphone",
@@ -112,7 +119,7 @@ export const demoAccountSummaries: AccountSummary[] = [
     accountId: "acct-cash-0001",
     institutionName: "Cash Wallet",
     maskedAccountNumber: "Pocket cash",
-    balanceMinor: 45000,
+    balanceMinor: 18000,
     currencyCode: "ETB",
     channel: "cash",
     iconName: "payments",
@@ -127,12 +134,13 @@ export const demoApprovalQueue: ApprovalQueueItem[] = [
       rawMessageId: "demo-grocery-pending",
       senderLabel: "CBE",
       rawBody:
-        "CBE ALERT: Your account 4920 was debited with ETB 450.00 on 2026-04-29 at GROCERY STORE. Bal ETB 8450.00",
+        "CBE ALERT: Your account 2401 was debited with ETB 450.00 on 2026-04-29 at GROCERY STORE. Bal ETB 6400.00",
       financialInstitution: "cbe",
       transactionDirection: "debit",
       amountMinor: 45000,
       feeMinor: 0,
-      runningBalanceMinor: 845000,
+      runningBalanceMinor: 640000,
+      reportedBalanceMinor: 640000,
       currencyCode: "ETB",
       title: "Grocery Store",
       merchantName: "GROCERY STORE",
@@ -140,7 +148,7 @@ export const demoApprovalQueue: ApprovalQueueItem[] = [
       parserTemplateId: "cbe_debit_v1",
       confidence: 100,
       occurredAt: "2026-04-29T00:00:00.000Z",
-      accountReference: "4920",
+      accountReference: "2401",
       accountChannel: "bank",
       note: "",
     },
@@ -152,12 +160,13 @@ export const demoApprovalQueue: ApprovalQueueItem[] = [
       rawMessageId: "demo-fuel-pending",
       senderLabel: "Dashen",
       rawBody:
-        "Dashen Alert: ETB 180.00 paid from Acct 1104 on 2026-04-28 to FUEL STATION. Bal ETB 3550.00",
+        "Dashen Alert: ETB 180.00 paid from Acct 8805 on 2026-04-28 to FUEL STATION. Bal ETB 2850.00",
       financialInstitution: "dashen",
       transactionDirection: "debit",
       amountMinor: 18000,
       feeMinor: 0,
-      runningBalanceMinor: 355000,
+      runningBalanceMinor: 285000,
+      reportedBalanceMinor: 285000,
       currencyCode: "ETB",
       title: "Fuel Station",
       merchantName: "FUEL STATION",
@@ -165,7 +174,7 @@ export const demoApprovalQueue: ApprovalQueueItem[] = [
       parserTemplateId: "dashen_debit_v1",
       confidence: 100,
       occurredAt: "2026-04-28T00:00:00.000Z",
-      accountReference: "1104",
+      accountReference: "8805",
       accountChannel: "bank",
       note: "",
     },
@@ -177,12 +186,13 @@ export const demoApprovalQueue: ApprovalQueueItem[] = [
       rawMessageId: "demo-streaming-pending",
       senderLabel: "Telebirr",
       rawBody:
-        "Telebirr: you have paid ETB 120.00 to STREAMING SERVICE on 2026-04-27. current balance is ETB 1800.00",
+        "Telebirr: you have paid ETB 120.00 to STREAMING SERVICE on 2026-04-27. current balance is ETB 960.00",
       financialInstitution: "telebirr",
       transactionDirection: "debit",
       amountMinor: 12000,
       feeMinor: 0,
-      runningBalanceMinor: 180000,
+      runningBalanceMinor: 96000,
+      reportedBalanceMinor: 96000,
       currencyCode: "ETB",
       title: "Streaming Service",
       merchantName: "STREAMING SERVICE",
@@ -190,7 +200,7 @@ export const demoApprovalQueue: ApprovalQueueItem[] = [
       parserTemplateId: "telebirr_manual_seed_v1",
       confidence: 94,
       occurredAt: "2026-04-27T00:00:00.000Z",
-      accountReference: "0172",
+      accountReference: "0042",
       accountChannel: "mobile_money",
       note: "",
     },
@@ -205,12 +215,13 @@ export const demoApprovedTransactions: ApprovedTransaction[] = [
       rawMessageId: "demo-rent-approved",
       senderLabel: "Dashen",
       rawBody:
-        "Dashen Alert: ETB 1200.00 paid from Acct 1104 on 2026-04-02 to RENT PAYMENT. Bal ETB 3730.00",
+        "Dashen Alert: ETB 1200.00 paid from Acct 8805 on 2026-04-02 to RENT PAYMENT. Bal ETB 3010.00",
       financialInstitution: "dashen",
       transactionDirection: "debit",
       amountMinor: 120000,
       feeMinor: 0,
-      runningBalanceMinor: 373000,
+      runningBalanceMinor: 301000,
+      reportedBalanceMinor: 301000,
       currencyCode: "ETB",
       title: "Rent Payment",
       merchantName: "RENT PAYMENT",
@@ -218,7 +229,7 @@ export const demoApprovedTransactions: ApprovedTransaction[] = [
       parserTemplateId: "dashen_seed_housing_v1",
       confidence: 100,
       occurredAt: "2026-04-02T00:00:00.000Z",
-      accountReference: "1104",
+      accountReference: "8805",
       accountChannel: "bank",
       note: "Monthly housing payment",
     },
@@ -230,12 +241,13 @@ export const demoApprovedTransactions: ApprovedTransaction[] = [
       rawMessageId: "demo-grocery-approved",
       senderLabel: "CBE",
       rawBody:
-        "CBE ALERT: Your account 4920 was debited with ETB 450.00 on 2026-04-10 at GROCERY STORE. Bal ETB 8900.00",
+        "CBE ALERT: Your account 2401 was debited with ETB 450.00 on 2026-04-10 at GROCERY STORE. Bal ETB 6850.00",
       financialInstitution: "cbe",
       transactionDirection: "debit",
       amountMinor: 45000,
       feeMinor: 0,
-      runningBalanceMinor: 890000,
+      runningBalanceMinor: 685000,
+      reportedBalanceMinor: 685000,
       currencyCode: "ETB",
       title: "Grocery Store",
       merchantName: "GROCERY STORE",
@@ -243,7 +255,7 @@ export const demoApprovedTransactions: ApprovedTransaction[] = [
       parserTemplateId: "cbe_seed_food_v1",
       confidence: 100,
       occurredAt: "2026-04-10T00:00:00.000Z",
-      accountReference: "4920",
+      accountReference: "2401",
       accountChannel: "bank",
       note: "Weekly groceries",
     },
@@ -255,12 +267,13 @@ export const demoApprovedTransactions: ApprovedTransaction[] = [
       rawMessageId: "demo-fuel-approved",
       senderLabel: "Dashen",
       rawBody:
-        "Dashen Alert: ETB 180.00 paid from Acct 1104 on 2026-04-14 to FUEL STATION. Bal ETB 3550.00",
+        "Dashen Alert: ETB 180.00 paid from Acct 8805 on 2026-04-14 to FUEL STATION. Bal ETB 3170.00",
       financialInstitution: "dashen",
       transactionDirection: "debit",
       amountMinor: 18000,
       feeMinor: 0,
-      runningBalanceMinor: 355000,
+      runningBalanceMinor: 317000,
+      reportedBalanceMinor: 317000,
       currencyCode: "ETB",
       title: "Fuel Station",
       merchantName: "FUEL STATION",
@@ -268,13 +281,82 @@ export const demoApprovedTransactions: ApprovedTransaction[] = [
       parserTemplateId: "dashen_seed_transport_v1",
       confidence: 100,
       occurredAt: "2026-04-14T00:00:00.000Z",
-      accountReference: "1104",
+      accountReference: "8805",
       accountChannel: "bank",
       note: "Fuel top-up",
     },
     "2026-04-14T08:45:00.000Z",
   ),
 ];
+
+export const demoNearbySyncDevices: NearbySyncDevice[] = [
+  {
+    deviceId: "nearby-desktop-authority",
+    displayName: "Demo Desktop Authority",
+    platform: "desktop",
+    signalStrength: 92,
+    statusLabel: "Ready for trusted pairing",
+    discoveredAt: "2026-04-30T14:00:00.000Z",
+    pairingCodeHint: "284913",
+  },
+  {
+    deviceId: "nearby-surface-review",
+    displayName: "Surface Review Station",
+    platform: "desktop",
+    signalStrength: 74,
+    statusLabel: "Seen on local network",
+    discoveredAt: "2026-04-30T14:03:00.000Z",
+    pairingCodeHint: "551204",
+  },
+];
+
+export const demoTrustedSyncDevices: TrustedSyncDevice[] = [
+  {
+    deviceId: "trusted-desktop-authority",
+    displayName: "Demo Desktop Vault",
+    platform: "desktop",
+    connectedAt: "2026-04-29T20:00:00.000Z",
+    lastSyncedAt: "2026-04-30T11:45:00.000Z",
+    health: "healthy",
+    isPrimary: true,
+    autoSyncEnabled: true,
+  },
+];
+
+export const demoSyncActivity: SyncActivityEntry[] = [
+  {
+    activityId: "sync-activity-001",
+    type: "sync",
+    status: "success",
+    title: "Manual sync completed",
+    detail: "Pushed 3 approved transactions to Demo Desktop Vault.",
+    occurredAt: "2026-04-30T11:45:00.000Z",
+  },
+  {
+    activityId: "sync-activity-002",
+    type: "pairing",
+    status: "success",
+    title: "Desktop authority trusted",
+    detail: "Demo Desktop Vault is now marked as the primary nearby target.",
+    occurredAt: "2026-04-29T20:00:00.000Z",
+  },
+  {
+    activityId: "sync-activity-003",
+    type: "discovery",
+    status: "pending",
+    title: "Nearby scan active",
+    detail: "Looking for trusted desktop listeners on the local network.",
+    occurredAt: "2026-04-30T14:03:00.000Z",
+  },
+];
+
+export const demoPairingCodeState: PairingCodeState = {
+  generatedCode: "284913",
+  expiresAt: "2026-04-30T14:20:00.000Z",
+  pendingCodeInput: "",
+  lastSubmittedCode: null,
+  errorMessage: null,
+};
 
 export function buildBudgetSummaries(
   approvedTransactions: readonly ApprovedTransaction[],
@@ -286,6 +368,13 @@ export function buildBudgetSummaries(
     "entertainment",
     "misc",
   ];
+  const includesIncome = approvedTransactions.some(
+    (transaction) => transaction.category === "income",
+  );
+
+  if (includesIncome) {
+    trackedCategories.push("income");
+  }
 
   return trackedCategories.map((category) => {
     const spentMinor = approvedTransactions

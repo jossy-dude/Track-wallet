@@ -1,20 +1,38 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 
 import {
+  buildParserRuntimeOptionsFromWorkspace,
+  cloneDefaultParserTemplates,
   FINANCIAL_INSTITUTION_LABELS,
+  inspectParserTemplate,
+  migrateResolvedTemplatesToWorkspace,
+  resolveParserTemplateWorkspace,
   TRANSACTION_CATEGORY_LABELS,
+  type FinancialInstitution,
   type NearbySyncDevice,
+  type ParserTemplateDateMode,
+  type ParserTemplateDefinition,
+  type ParserTemplateInspectionBinding,
+  type ParserTemplateStatus,
+  type TransactionDirection,
 } from "@omni-sync/core";
-import { transactionStore, useTransactionStore } from "@omni-sync/database";
+import { useTransactionStore } from "@omni-sync/database";
 import { MaterialSymbol } from "@omni-sync/ui";
 
 import {
+  MotionPage,
   MotionPanel,
   SettingsMotionStyles,
   StatusChip,
   pressableClass,
 } from "../components/settingsMotionPrimitives";
 import { useParser } from "../hooks/useParser";
+import {
+  clearAccountProfilePreferences,
+  getDefaultAccountProfilePreferences,
+  persistAccountProfilePreferences,
+  readAccountProfilePreferences,
+} from "../preferences/accountPreferences";
 import {
   persistBottomNavStylePreference,
   persistCurrencyLabelPreference,
@@ -32,11 +50,17 @@ import {
   readParserWorkspacePreferences,
 } from "../preferences/parserPreferences";
 import {
+  readSecurityPreferences,
+} from "../preferences/securityPreferences";
+import { readDemoModeEnabled } from "../preferences/setupPreferences";
+import {
   helpCategoryCards,
   helpFeaturedFaqs,
   type HelpCategoryCard,
 } from "./settingsHelpContent";
 import { DataStoragePage } from "./DataStoragePage";
+import { ParsingWorkspacePage } from "./ParsingWorkspacePage";
+import { SmsCaptureRoutingPage } from "./SmsCaptureRoutingPage";
 import { type SettingsPageId } from "./settingsHubContent";
 
 type AppTabId = "home" | "inbox" | "ledger" | "accounts";
@@ -46,6 +70,8 @@ interface SettingsDetailScreenProps {
   onOpenPage?: (pageId: SettingsPageId) => void;
   onOpenTab?: (tabId: AppTabId) => void;
   orderedAccountIds?: readonly string[];
+  demoModeEnabled?: boolean;
+  onRequestEnableDemoMode?: () => void;
 }
 
 const currencyFormatter = new Intl.NumberFormat("en-US", {
@@ -66,11 +92,42 @@ const shortDateTimeFormatter = new Intl.DateTimeFormat("en-US", {
 });
 
 const parserSenderOptions = [
-  { value: "CBE", label: "CBE" },
-  { value: "DashenBank", label: "Dashen Bank" },
-  { value: "127", label: "Telebirr" },
-  { value: "BOA", label: "BOA" },
-  { value: "BunnaBank", label: "Bunna Bank" },
+  {
+    value: "CBE",
+    label: "CBE",
+    financialInstitution: "cbe" as const,
+    icon: "account_balance",
+  },
+  {
+    value: "DashenBank",
+    label: "Dashen Bank",
+    financialInstitution: "dashen" as const,
+    icon: "account_balance",
+  },
+  {
+    value: "127",
+    label: "Telebirr",
+    financialInstitution: "telebirr" as const,
+    icon: "account_balance_wallet",
+  },
+  {
+    value: "BOA",
+    label: "BOA",
+    financialInstitution: "boa" as const,
+    icon: "account_balance",
+  },
+  {
+    value: "CBEBirr",
+    label: "CBEBirr",
+    financialInstitution: "cbebirr" as const,
+    icon: "account_balance_wallet",
+  },
+  {
+    value: "BunnaBank",
+    label: "Bunna Bank",
+    financialInstitution: "bunna" as const,
+    icon: "account_balance",
+  },
 ] as const;
 
 const parserSandboxFallbackSamples: Record<string, string> = {
@@ -79,6 +136,8 @@ const parserSandboxFallbackSamples: Record<string, string> = {
     "Dashen Alert: ETB 1,250.00 debited from account 7788 on 2026-04-28 at FUEL STATION. Available balance ETB 19,880.00",
   127: "Telebirr: ETB 320.00 paid to COFFEE SHOP from wallet 0172 on 2026-04-28. Current balance ETB 1,880.00",
   BOA: "BOA ALERT: ETB 980.00 credited to account 2104 on 2026-04-27 from CLIENT PAYMENT. Bal ETB 15,420.00",
+  CBEBirr:
+    "You have withdrawn 500.00Br from CBE ATM. charge 5.00Br tax 0.75Br. balance is 1,244.25Br",
   BunnaBank:
     "Bunna alert: ETB 215.00 debited from account 1633 on 2026-04-26 at TAXI FARE. Bal ETB 5,615.00",
 };
@@ -100,6 +159,103 @@ function matchesParserSenderFamily(sourceValue: string, senderLabel: string) {
   }
 
   return false;
+}
+
+function getParserSenderOption(senderValue: string) {
+  return (
+    parserSenderOptions.find((option) => option.value === senderValue) ??
+    parserSenderOptions[0]
+  );
+}
+
+function getInstitutionKeyForTemplate(template: ParserTemplateDefinition): string {
+  return template.senderAliases[0] ?? template.institutionKey;
+}
+
+function buildParserTemplateNote(template: ParserTemplateDefinition): string {
+  const mappedFields = [
+    template.amountKey,
+    template.merchantKey,
+    template.balanceKey,
+    template.feeKey,
+    template.vatKey,
+    template.accountKey,
+    template.referenceKey,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  return mappedFields
+    ? `${template.direction} route with ${mappedFields}`
+    : `${template.direction} route`;
+}
+
+function buildParserSourceFromBindings(
+  bindings: ParserTemplateInspectionBinding[],
+  template: ParserTemplateDefinition,
+): string {
+  const bindingLines = bindings.map((binding, index) => {
+    const lineNumber = 11 + index;
+    const propertyName = binding.field === "extra_fee" ? "extraFee" : binding.field;
+    const valueExpression = binding.captureKey
+      ? `match.groups.${binding.captureKey} ?? null`
+      : "null";
+    return `${lineNumber}     ${propertyName}: ${valueExpression},`;
+  });
+
+  return [
+    "1  function parseSMS(message) {",
+    `2    const regex = /${template.regex}/i;`,
+    "3    const match = message.match(regex);",
+    "4",
+    "5    if (!match?.groups) {",
+    "6      return null;",
+    "7    }",
+    "8",
+    "9    return {",
+    `10     direction: "${template.direction}",`,
+    ...bindingLines,
+    `${11 + bindingLines.length}   };`,
+    `${12 + bindingLines.length} }`,
+  ].join("\n");
+}
+
+function createTemplateBuilderSeed(
+  sender = "CBE",
+): {
+  sender: string;
+  name: string;
+  regex: string;
+  direction: TransactionDirection;
+  amountKey: string;
+  merchantKey: string;
+  balanceKey: string;
+  feeKey: string;
+  vatKey: string;
+  accountKey: string;
+  referenceKey: string;
+  dateKey: string;
+  timeKey: string;
+  meridiemKey: string;
+  dateMode: ParserTemplateDateMode;
+} {
+  return {
+    sender,
+    name: "",
+    regex: "",
+    direction: "debit",
+    amountKey: "amount",
+    merchantKey: "merchant",
+    balanceKey: "balance",
+    feeKey: "fee",
+    vatKey: "vat",
+    accountKey: "account",
+    referenceKey: "reference",
+    dateKey: "date",
+    timeKey: "time",
+    meridiemKey: "meridiem",
+    dateMode: "message_date",
+  };
 }
 
 const appearanceAccents = [
@@ -165,6 +321,14 @@ function materialForDevice(device: { platform: NearbySyncDevice["platform"] }) {
   }
 
   return "phone_iphone";
+}
+
+function sanitizeAlphaSyncCopy(value: string) {
+  return value
+    .replace(/local preview route/gi, "saved route")
+    .replace(/trusted preview route/gi, "saved route")
+    .replace(/trusted route/gi, "saved route")
+    .replace(/desktop route/gi, "saved device route");
 }
 
 function SwitchButton({
@@ -331,12 +495,22 @@ function OverlayPanel({
 }
 
 function ManageAccountPage() {
-  const defaultProfileNote = "Local-first finance workspace owner";
-  const [displayName, setDisplayName] = useState("Jossy");
-  const [profileNote, setProfileNote] = useState(defaultProfileNote);
-  const [hideBalances, setHideBalances] = useState(true);
-  const [blurNotifications, setBlurNotifications] = useState(true);
-  const [requireExportReview, setRequireExportReview] = useState(true);
+  const defaultPreferences = getDefaultAccountProfilePreferences();
+  const [displayName, setDisplayName] = useState(() =>
+    readAccountProfilePreferences().displayName,
+  );
+  const [profileNote, setProfileNote] = useState(() =>
+    readAccountProfilePreferences().profileNote,
+  );
+  const [hideBalances, setHideBalances] = useState(() =>
+    readAccountProfilePreferences().hideBalances,
+  );
+  const [blurNotifications, setBlurNotifications] = useState(() =>
+    readAccountProfilePreferences().blurNotifications,
+  );
+  const [requireExportReview, setRequireExportReview] = useState(() =>
+    readAccountProfilePreferences().requireExportReview,
+  );
   const [saveState, setSaveState] = useState<ActionState>("idle");
   const [statusToast, setStatusToast] = useState<{
     tone: StatusTone;
@@ -349,11 +523,18 @@ function ManageAccountPage() {
   }
 
   function handleSave() {
+    persistAccountProfilePreferences({
+      displayName: displayName.trim().length > 0 ? displayName.trim() : defaultPreferences.displayName,
+      profileNote,
+      hideBalances,
+      blurNotifications,
+      requireExportReview,
+    });
     setSaveState("working");
     setTimeout(() => {
       setSaveState("done");
       showAccountStatus(
-        "Account preferences were saved locally on this phone.",
+        "Saved the local profile for this phone. Name and note are live here, while privacy rows stay blocked until native enforcement lands.",
         "success",
       );
       setTimeout(() => setSaveState("idle"), 1200);
@@ -361,11 +542,12 @@ function ManageAccountPage() {
   }
 
   function handleResetProfile() {
-    setDisplayName("Jossy");
-    setProfileNote(defaultProfileNote);
-    setHideBalances(true);
-    setBlurNotifications(true);
-    setRequireExportReview(true);
+    clearAccountProfilePreferences();
+    setDisplayName(defaultPreferences.displayName);
+    setProfileNote(defaultPreferences.profileNote);
+    setHideBalances(defaultPreferences.hideBalances);
+    setBlurNotifications(defaultPreferences.blurNotifications);
+    setRequireExportReview(defaultPreferences.requireExportReview);
     showAccountStatus(
       "Local profile preferences were reset on this device.",
       "warning",
@@ -379,11 +561,10 @@ function ManageAccountPage() {
       ) : null}
       <MotionPanel className="space-y-2">
         <h2 className="font-headline text-3xl font-semibold text-on-surface">
-          Manage Account
+          Local profile
         </h2>
         <p className="text-sm leading-6 text-on-surface-variant">
-          Update your identity, profile image, and privacy controls for this
-          mobile workspace.
+          Update the name and note that this phone uses locally.
         </p>
       </MotionPanel>
 
@@ -406,23 +587,23 @@ function ManageAccountPage() {
                 {displayName}
               </p>
               <p className="mt-1 text-sm text-on-surface-variant">
-                Profile photo stays local to this device until sync identity is
-                backed by the authority layer.
+                Profile image stays local to this phone.
               </p>
             </div>
           </div>
-          <button
-            className={`rounded-2xl border border-outline-variant/40 bg-surface px-4 py-3 text-sm font-semibold text-primary ${pressableClass}`}
-            onClick={() =>
-              showAccountStatus(
-                "Native photo picking lands in the device integration pass. The profile shell is ready for it.",
-                "warning",
-              )
-            }
-            type="button"
-          >
-            Choose profile image
-          </button>
+          <div className="max-w-xs rounded-2xl border border-outline-variant/30 bg-surface px-4 py-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-on-surface-variant">
+              Profile photo
+            </p>
+            <p className="mt-2 text-sm font-semibold text-on-surface">
+              Not live yet.
+            </p>
+            <p className="mt-1 text-sm leading-6 text-on-surface-variant">
+              Display name and profile note save locally now. Privacy and export
+              protections stay visible below as blocked or coming-soon rows
+              until native enforcement and export-review flows land.
+            </p>
+          </div>
         </div>
       </MotionPanel>
 
@@ -463,9 +644,7 @@ function ManageAccountPage() {
               Identity posture
             </p>
             <p className="mt-2 text-sm leading-6 text-on-surface-variant">
-              Your profile should describe the person approving transactions on
-              this device. Keep names and images grounded so sync/device trust
-              screens stay understandable later.
+              Use the name and note that should represent this phone.
             </p>
           </div>
         </MotionPanel>
@@ -479,47 +658,74 @@ function ManageAccountPage() {
               Privacy controls
             </p>
             <div className="mt-4 space-y-3">
-              {[ 
+              {[
                 {
-                  label: "Hide balance figures in app switcher",
-                  checked: hideBalances,
-                  onToggle: () => setHideBalances((current) => !current),
+                  label: "App switcher balance masking",
+                  detail:
+                    "Blocked until the Android shell can actually hide balance figures outside the app.",
+                  state: hideBalances ? "Stored default: On" : "Stored default: Off",
+                  tone: "warning" as const,
+                  chipLabel: "Blocked",
                 },
                 {
-                  label: "Blur notifications on lock screen",
-                  checked: blurNotifications,
-                  onToggle: () => setBlurNotifications((current) => !current),
+                  label: "Lock-screen notification privacy",
+                  detail:
+                    "Coming soon once notification redaction is wired into the native runtime.",
+                  state: blurNotifications ? "Stored default: On" : "Stored default: Off",
+                  tone: "warning" as const,
+                  chipLabel: "Coming soon",
                 },
                 {
-                  label: "Require review before exporting data",
-                  checked: requireExportReview,
-                  onToggle: () =>
-                    setRequireExportReview((current) => !current),
+                  label: "Export confirmation gate",
+                  detail:
+                    "Tracked as a stored default only until real export-review enforcement joins the package flow.",
+                  state: requireExportReview
+                    ? "Stored default: On"
+                    : "Stored default: Off",
+                  tone: "neutral" as const,
+                  chipLabel: "Saved status",
                 },
               ].map((item) => (
-                <div className="flex items-center justify-between" key={item.label}>
-                  <span className="text-sm text-on-surface">{item.label}</span>
-                  <SwitchButton
-                    ariaLabel={item.label}
-                    checked={item.checked}
-                    onToggle={item.onToggle}
-                  />
+                <div
+                  className="rounded-2xl border border-outline-variant/20 bg-surface-container-low px-4 py-4"
+                  key={item.label}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-on-surface">
+                        {item.label}
+                      </p>
+                      <p className="mt-1 text-sm leading-6 text-on-surface-variant">
+                        {item.detail}
+                      </p>
+                      <p className="mt-2 text-xs font-semibold uppercase tracking-[0.14em] text-on-surface-variant">
+                        {item.state}
+                      </p>
+                    </div>
+                    <StatusChip icon="block" tone={item.tone}>
+                      {item.chipLabel}
+                    </StatusChip>
+                  </div>
                 </div>
               ))}
             </div>
           </div>
-          <button
-            className={`w-full rounded-2xl border border-outline-variant/30 bg-surface px-4 py-3 text-sm font-semibold text-on-surface ${pressableClass}`}
-            onClick={() =>
-              showAccountStatus(
-                "Profile export is staged as a local action until backend export packaging is wired.",
-                "warning",
-              )
-            }
-            type="button"
-          >
-            Export personal data
-          </button>
+          <div className="rounded-2xl border border-outline-variant/20 bg-surface px-4 py-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-on-surface">
+                  Profile export package
+                </p>
+                <p className="mt-1 text-sm leading-6 text-on-surface-variant">
+                  Coming soon. Use Data &amp; Storage for the real working export
+                  and backup flows in this alpha.
+                </p>
+              </div>
+              <StatusChip icon="schedule" tone="warning">
+                Coming soon
+              </StatusChip>
+            </div>
+          </div>
           <button
             className={`w-full rounded-2xl border border-error/20 bg-error/10 px-4 py-3 text-sm font-semibold text-error ${pressableClass}`}
             onClick={handleResetProfile}
@@ -534,7 +740,7 @@ function ManageAccountPage() {
         actionState={saveState}
         className="inline-flex min-h-12 items-center gap-2 rounded-2xl bg-primary px-5 py-3 font-semibold text-on-primary shadow-[0_4px_20px_rgba(46,50,48,0.08)]"
         doneLabel="Saved"
-        idleLabel="Save account settings"
+        idleLabel="Save local profile"
         onClick={handleSave}
         workingLabel="Saving..."
       />
@@ -544,13 +750,17 @@ function ManageAccountPage() {
 
 function AppearancePage({
   orderedAccountIds = [],
+  demoModeEnabled = readDemoModeEnabled(),
+  onRequestEnableDemoMode = () => undefined,
 }: {
   orderedAccountIds?: readonly string[];
+  demoModeEnabled?: boolean;
+  onRequestEnableDemoMode?: () => void;
 }) {
   const accountSummaries = useTransactionStore((state) => state.accountSummaries);
-  const [theme, setTheme] = useState<"light" | "dark" | "system">("light");
-  const [fontScale, setFontScale] = useState("3");
-  const [density, setDensity] = useState<"compact" | "balanced" | "spaced">(
+  const [theme] = useState<"light" | "dark" | "system">("light");
+  const [fontScale] = useState("3");
+  const [density] = useState<"compact" | "balanced" | "spaced">(
     "balanced",
   );
   const [currencyLabel, setCurrencyLabel] = useState<CurrencyLabelPreference>(() =>
@@ -566,7 +776,7 @@ function AppearancePage({
       ? [...orderedAccountIds]
       : accountSummaries.map((account) => account.accountId),
   );
-  const [selectedAccent, setSelectedAccent] = useState("forest");
+  const [selectedAccent] = useState("forest");
   const [saveState, setSaveState] = useState<ActionState>("idle");
   const [statusToast, setStatusToast] = useState<{
     tone: StatusTone;
@@ -584,7 +794,7 @@ function AppearancePage({
       setStatusToast({
         tone: "success",
         message:
-          "Appearance preferences were saved locally on this device and Home updated immediately.",
+          "Saved the live appearance settings for this phone. Theme, accent, typography, and density remain preview-only in this alpha.",
       });
       setTimeout(() => setSaveState("idle"), 1200);
       setTimeout(() => setStatusToast(null), 2200);
@@ -652,17 +862,62 @@ function AppearancePage({
           Appearance
         </h2>
         <p className="text-sm leading-6 text-on-surface-variant">
-          Tune the visual language of Track Wallet across light, dense, and
-          calm viewing modes.
+          Live on this phone: showcase mode, currency label, default account,
+          navigation dock, and account order. Theme, accent, typography, and
+          density stay preview-only in this alpha.
         </p>
       </MotionPanel>
 
+      <MotionPanel className="space-y-4" delay={20}>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="font-headline text-2xl font-semibold text-on-surface">
+              Showcase mode
+            </h3>
+            <p className="mt-2 text-sm text-on-surface-variant">
+              Loads sample data for the walkthrough.
+            </p>
+          </div>
+          <StatusChip
+            icon={demoModeEnabled ? "science" : "check_circle"}
+            tone={demoModeEnabled ? "warning" : "success"}
+          >
+            {demoModeEnabled ? "Active" : "Off"}
+          </StatusChip>
+        </div>
+
+        <div className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-5 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
+          <p className="text-sm leading-6 text-on-surface-variant">
+            {demoModeEnabled
+              ? "Showcase is active on this phone. Return to private mode from the top bar."
+              : "Load showcase again if you need the walkthrough. It replaces local finance data on this phone."}
+          </p>
+          {!demoModeEnabled ? (
+            <div className="mt-4 flex justify-end">
+              <button
+                className={`rounded-2xl bg-primary px-4 py-3 text-sm font-semibold text-on-primary ${pressableClass}`}
+                onClick={onRequestEnableDemoMode}
+                type="button"
+              >
+                Load showcase mode
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </MotionPanel>
+
       <MotionPanel className="space-y-4" delay={40}>
-        <h3 className="font-headline text-2xl font-semibold text-on-surface">
-          Theme
-        </h3>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="font-headline text-2xl font-semibold text-on-surface">
+            Theme
+          </h3>
+          <StatusChip icon="visibility" tone="warning">
+            Preview only in this alpha
+          </StatusChip>
+        </div>
         <p className="text-sm text-on-surface-variant">
-          Select how the app looks across your devices.
+          Shared theming is still in the cross-surface lane, so these previews
+          stay visible for review but do not save or apply yet.
         </p>
         <div className="grid gap-6 md:grid-cols-3">
           {([
@@ -672,9 +927,9 @@ function AppearancePage({
           ] as const).map((option) => (
             <button
               aria-pressed={theme === option.id}
-              className={`group flex flex-col items-center gap-4 rounded-xl p-1 text-left transition ${pressableClass}`}
+              className={`group flex cursor-not-allowed flex-col items-center gap-4 rounded-xl p-1 text-left opacity-70 transition`}
+              disabled
               key={option.id}
-              onClick={() => setTheme(option.id)}
               type="button"
             >
               <div
@@ -755,23 +1010,28 @@ function AppearancePage({
       <div className="h-px bg-outline-variant/30" />
 
       <MotionPanel className="space-y-6" delay={90}>
-        <h3 className="font-headline text-2xl font-semibold text-on-surface">
-          Color Accent
-        </h3>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="font-headline text-2xl font-semibold text-on-surface">
+            Color Accent
+          </h3>
+          <StatusChip icon="visibility" tone="warning">
+            Preview only in this alpha
+          </StatusChip>
+        </div>
         <div className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
           <div className="flex items-center gap-4 overflow-x-auto pb-2">
             {appearanceAccents.map((accent) => (
               <button
                 aria-pressed={selectedAccent === accent.id}
-                className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full ${
+                className={`flex h-14 w-14 shrink-0 cursor-not-allowed items-center justify-center rounded-full opacity-70 ${
                   accent.color
-                } ${pressableClass} ${
+                } ${
                   selectedAccent === accent.id
                     ? "ring-4 ring-primary-container/40 ring-offset-2 ring-offset-surface-container-low"
                     : ""
                 }`}
+                disabled
                 key={accent.id}
-                onClick={() => setSelectedAccent(accent.id)}
                 type="button"
               >
                 {selectedAccent === accent.id ? (
@@ -899,7 +1159,15 @@ function AppearancePage({
                       : "border-outline-variant/18 bg-surface"
                   }`}
                   key={option.id}
-                  onClick={() => setBottomNavStyle(option.id)}
+                  onClick={() => {
+                    setBottomNavStyle(option.id);
+                    persistBottomNavStylePreference(option.id);
+                    setStatusToast({
+                      tone: "success",
+                      message:
+                        "Navigation dock style switched for the live app shell.",
+                    });
+                  }}
                   type="button"
                 >
                   <div className="relative h-[112px] overflow-hidden rounded-[22px] bg-[linear-gradient(180deg,#243041,#30445e)] px-4 pt-4">
@@ -966,20 +1234,25 @@ function AppearancePage({
           delay={180}
         >
           <div>
-            <h3 className="font-headline text-xl font-semibold text-on-surface">
-              Typography
-            </h3>
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="font-headline text-xl font-semibold text-on-surface">
+                Typography
+              </h3>
+              <StatusChip icon="schedule" tone="warning">
+                Preview only
+              </StatusChip>
+            </div>
             <p className="mt-2 text-sm text-on-surface-variant">
-              Adjust the text size for reading comfort.
+              Text scaling is not wired into the shared shell yet.
             </p>
           </div>
           <div className="mt-8 flex items-center gap-4">
             <MaterialSymbol className="text-sm text-on-surface-variant" name="format_size" />
             <input
-              className="h-2 w-full cursor-pointer appearance-none rounded-lg bg-surface-variant accent-primary"
+              className="h-2 w-full cursor-not-allowed appearance-none rounded-lg bg-surface-variant accent-primary opacity-70"
+              disabled
               max="5"
               min="1"
-              onChange={(event) => setFontScale(event.target.value)}
               type="range"
               value={fontScale}
             />
@@ -992,24 +1265,30 @@ function AppearancePage({
           delay={220}
         >
           <div>
-            <h3 className="font-headline text-xl font-semibold text-on-surface">
-              Layout Density
-            </h3>
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="font-headline text-xl font-semibold text-on-surface">
+                Layout Density
+              </h3>
+              <StatusChip icon="schedule" tone="warning">
+                Preview only
+              </StatusChip>
+            </div>
             <p className="mt-2 text-sm text-on-surface-variant">
-              Choose how much space surrounds content.
+              Density controls will land when the shared mobile shell supports
+              global spacing tokens.
             </p>
           </div>
           <div className="mt-6 flex overflow-hidden rounded-lg border border-outline-variant/40 bg-surface">
             {(["compact", "balanced", "spaced"] as const).map((option) => (
               <button
                 aria-pressed={density === option}
-                className={`flex-1 py-3 text-sm font-medium capitalize ${pressableClass} ${
+                className={`flex-1 cursor-not-allowed py-3 text-sm font-medium capitalize opacity-70 ${
                   density === option
                     ? "bg-primary-container/20 font-semibold text-primary"
                     : "text-on-surface-variant"
                 }`}
+                disabled
                 key={option}
-                onClick={() => setDensity(option)}
                 type="button"
               >
                 {option}
@@ -1085,13 +1364,10 @@ function AppearancePage({
 
 function SecurityPage() {
   const trustedSyncDevices = useTransactionStore((state) => state.trustedSyncDevices);
-  const [biometricsEnabled, setBiometricsEnabled] = useState(true);
-  const [requireBiometricOnOpen, setRequireBiometricOnOpen] = useState(true);
-  const [requireBiometricOnApprove, setRequireBiometricOnApprove] = useState(true);
-  const [requireBiometricOnDelete, setRequireBiometricOnDelete] = useState(true);
-  const [requireBiometricOnForwarding, setRequireBiometricOnForwarding] = useState(false);
-  const [twoFactorEnabled, setTwoFactorEnabled] = useState(true);
-  const [saveState, setSaveState] = useState<ActionState>("idle");
+  const persistedSecurityPreferences = useMemo(
+    () => readSecurityPreferences(),
+    [],
+  );
   const [isBiometricsPanelOpen, setIsBiometricsPanelOpen] = useState(false);
   const [statusToast, setStatusToast] = useState<{
     tone: StatusTone;
@@ -1126,31 +1402,37 @@ function SecurityPage() {
     setTimeout(() => setStatusToast(null), 2200);
   }
 
-  function handleSave() {
-    setSaveState("working");
-    setTimeout(() => {
-      setSaveState("done");
-      showSecurityStatus(
-        "Security preferences were saved locally on this device.",
-        "success",
-      );
-      setTimeout(() => setSaveState("idle"), 1200);
-    }, 700);
-  }
-
   return (
     <section className="space-y-8">
       {statusToast ? (
         <StatusToast message={statusToast.message} tone={statusToast.tone} />
       ) : null}
       <header className="space-y-2">
-        <h2 className="font-headline text-3xl font-semibold text-on-surface">
-          Security &amp; Privacy
-        </h2>
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="font-headline text-3xl font-semibold text-on-surface">
+            Security &amp; Privacy
+          </h2>
+          <StatusChip icon="visibility" tone="warning">
+            Read-only status
+          </StatusChip>
+        </div>
         <p className="text-sm leading-6 text-on-surface-variant">
-          Manage how you protect and access your Track Wallet workspace.
+          Native biometric prompts, secure secret storage, and remote
+          verification are not active in this alpha. This page now shows status
+          honestly instead of presenting live-looking security switches.
         </p>
       </header>
+
+      <MotionPanel className="rounded-[24px] border border-tertiary/18 bg-tertiary-container/20 p-5 shadow-[0_4px_20px_rgba(46,50,48,0.04)]">
+        <p className="text-sm font-semibold text-on-surface">
+          Security &amp; Privacy
+        </p>
+        <p className="text-sm leading-6 text-on-surface-variant">
+          Stored plan values from this phone are still visible for audit and
+          migration, but every protection below stays blocked or coming soon
+          until it has real platform backing.
+        </p>
+      </MotionPanel>
 
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">
@@ -1161,24 +1443,24 @@ function SecurityPage() {
               </div>
               <div>
                 <h3 className="font-headline text-lg font-semibold text-on-surface">
-                  Biometric Login
+                  Biometric unlock
                 </h3>
                 <p className="mb-3 mt-1 text-sm text-on-surface-variant">
-                  Use your device biometrics for secure, fast unlock.
+                  The stored plan stays visible, but biometrics are blocked
+                  until native prompts can actually run on-device.
                 </p>
                 <button
                   className="rounded-lg border border-outline-variant/50 bg-surface-container px-3 py-1.5 text-sm font-semibold text-primary"
                   onClick={() => setIsBiometricsPanelOpen(true)}
                   type="button"
                 >
-                  Configure Biometrics
+                  Review protection status
                 </button>
               </div>
             </div>
-            <SwitchButton
-              checked={biometricsEnabled}
-              onToggle={() => setBiometricsEnabled((current) => !current)}
-            />
+            <StatusChip icon="block" tone="warning">
+              Blocked until native prompts
+            </StatusChip>
           </article>
 
           <article className="flex items-start justify-between gap-3 rounded-xl border border-outline-variant/30 bg-surface p-4">
@@ -1191,19 +1473,40 @@ function SecurityPage() {
                   2-Step Verification
                 </h3>
                 <p className="mb-3 mt-1 text-sm text-on-surface-variant">
-                  Require a second step when a new device signs into your
-                  mobile workspace.
+                  Account-level verification is not wired into the mobile
+                  authority path yet, so this stays visible as roadmap status
+                  only.
                 </p>
                 <div className="inline-flex items-center gap-1.5 rounded-md bg-surface-container-low px-2 py-1 text-xs text-on-surface-variant">
                   <MaterialSymbol className="text-[14px]" name="verified_user" />
-                  Authenticator path configured
+                  Authority work pending
                 </div>
               </div>
             </div>
-            <SwitchButton
-              checked={twoFactorEnabled}
-              onToggle={() => setTwoFactorEnabled((current) => !current)}
-            />
+            <StatusChip icon="schedule" tone="warning">
+              Coming soon
+            </StatusChip>
+          </article>
+
+          <article className="rounded-xl border border-outline-variant/30 bg-surface p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-headline text-lg font-semibold text-on-surface">
+                  Stored protection plan
+                </h3>
+                <p className="mt-1 text-sm text-on-surface-variant">
+                  Existing values from this phone remain visible for migration
+                  and audit, but none of them are enforced live yet.
+                </p>
+                <p className="mt-3 text-xs font-semibold uppercase tracking-[0.14em] text-on-surface-variant">
+                  Biometrics {persistedSecurityPreferences.biometricsEnabled ? "planned on" : "planned off"}
+                  {" "}• 2-step {persistedSecurityPreferences.twoFactorEnabled ? "planned on" : "planned off"}
+                </p>
+              </div>
+              <StatusChip icon="visibility" tone="neutral">
+                Visible only
+              </StatusChip>
+            </div>
           </article>
         </div>
 
@@ -1211,7 +1514,7 @@ function SecurityPage() {
           <div className="border-b border-outline-variant/20 bg-surface-container-lowest p-3">
             <h3 className="flex items-center gap-2 font-headline text-base font-semibold text-on-surface">
               <MaterialSymbol className="text-lg text-primary" name="devices" />
-              Active Devices
+              Device Preview
             </h3>
           </div>
           <div className="p-1">
@@ -1239,55 +1542,26 @@ function SecurityPage() {
                     </p>
                   </div>
                 </div>
-                {!device.current ? (
-                  <button
-                    className="rounded bg-error/10 px-2 py-1 text-xs font-semibold text-error transition"
-                    onClick={() =>
-                      showSecurityStatus(
-                        "Trusted-device revocation will be fully backed by the authority layer in the backend pass.",
-                      )
-                    }
-                    type="button"
-                  >
-                    Revoke
-                  </button>
-                ) : null}
+                <StatusChip icon="visibility" tone="warning">
+                  Preview
+                </StatusChip>
               </div>
             ))}
           </div>
           <div className="border-t border-outline-variant/20 bg-surface-container-low p-3">
-            <button
-              className="flex w-full items-center justify-center gap-1 text-sm font-semibold text-primary hover:underline"
-              onClick={() =>
-                showSecurityStatus(
-                  "Bulk sign-out will become live once trusted-device auth is connected end to end.",
-                )
-              }
-              type="button"
-            >
-              Sign out of all devices
-              <MaterialSymbol className="text-sm" name="logout" />
-            </button>
+            <p className="text-xs leading-5 text-on-surface-variant">
+              Trusted-device rows come from the local sync preview only. Remote
+              revoke and sign-out stay hidden until transport-backed auth exists.
+            </p>
           </div>
         </section>
-      </div>
-
-      <div className="flex justify-end">
-        <ActionStatusButton
-          actionState={saveState}
-          className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-primary px-5 py-2.5 font-bold text-on-primary shadow-[0_4px_20px_rgba(46,50,48,0.06)]"
-          doneLabel="Saved"
-          idleLabel="Save Changes"
-          onClick={handleSave}
-          workingLabel="Saving..."
-        />
       </div>
 
       {isBiometricsPanelOpen ? (
         <OverlayPanel
           onClose={() => setIsBiometricsPanelOpen(false)}
-          subtitle="Review how this device should use biometric unlock before sensitive finance screens open."
-          title="Biometric unlock setup"
+          subtitle="Stored values from this phone remain visible here, but none of them trigger native or authority-backed enforcement yet."
+          title="Protection status"
         >
           <div className="grid gap-6 md:grid-cols-[1.1fr_0.9fr]">
             <section className="space-y-4 rounded-[24px] border border-outline-variant/20 bg-surface-container-low p-5">
@@ -1296,34 +1570,26 @@ function SecurityPage() {
                   {
                     label: "Require biometrics to open Track Wallet",
                     detail:
-                      "Protect the approval inbox and account balances when someone else picks up your phone.",
-                    checked: requireBiometricOnOpen,
-                    onToggle: () =>
-                      setRequireBiometricOnOpen((current) => !current),
+                      "Blocked until native unlock prompts can actually gate the app shell.",
+                    checked: persistedSecurityPreferences.requireBiometricOnOpen,
                   },
                   {
                     label: "Require biometrics before approval",
                     detail:
-                      "Gate Inbox approval so posted ledger entries need your fingerprint or face unlock.",
-                    checked: requireBiometricOnApprove,
-                    onToggle: () =>
-                      setRequireBiometricOnApprove((current) => !current),
+                      "Blocked until native confirmation prompts can run before approvals.",
+                    checked: persistedSecurityPreferences.requireBiometricOnApprove,
                   },
                   {
                     label: "Require biometrics before delete",
                     detail:
-                      "Use an extra check before removing manual or reviewed transactions.",
-                    checked: requireBiometricOnDelete,
-                    onToggle: () =>
-                      setRequireBiometricOnDelete((current) => !current),
+                      "Blocked until destructive edits can call real device prompts.",
+                    checked: persistedSecurityPreferences.requireBiometricOnDelete,
                   },
                   {
                     label: "Require biometrics for forwarding changes",
                     detail:
-                      "Lock recipient and routing edits behind biometrics.",
-                    checked: requireBiometricOnForwarding,
-                    onToggle: () =>
-                      setRequireBiometricOnForwarding((current) => !current),
+                      "Blocked until routing edits have a native prompt boundary.",
+                    checked: persistedSecurityPreferences.requireBiometricOnForwarding,
                   },
                 ].map((rule) => (
                   <div
@@ -1338,11 +1604,13 @@ function SecurityPage() {
                         <p className="mt-1 text-sm text-on-surface-variant">
                           {rule.detail}
                         </p>
+                        <p className="mt-2 text-xs font-semibold uppercase tracking-[0.14em] text-on-surface-variant">
+                          Stored default: {rule.checked ? "On" : "Off"}
+                        </p>
                       </div>
-                      <SwitchButton
-                        checked={rule.checked}
-                        onToggle={rule.onToggle}
-                      />
+                      <StatusChip icon="block" tone="warning">
+                        Blocked
+                      </StatusChip>
                     </div>
                   </div>
                 ))}
@@ -1354,21 +1622,24 @@ function SecurityPage() {
                 Current platform note
               </p>
               <p className="mt-3 text-sm leading-6 text-on-surface-variant">
-                This screen saves local preference intent now. The backend pass
-                still needs real OS biometric capability checks and secure
-                confirmation flows before this can be treated as production
-                security.
+                The authority store still carries any migrated or previously
+                saved plan values, which is useful for inspection and future
+                migration. Real OS biometric prompts, secure enclave-backed
+                secrets, and revocation flows still need native platform
+                wiring.
               </p>
-              <div className="mt-5 flex justify-end">
-                <ActionStatusButton
-                  actionState={saveState}
-                  className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-primary px-4 py-2.5 font-semibold text-on-primary"
-                  doneLabel="Saved"
-                  idleLabel="Apply biometric rule"
-                  onClick={handleSave}
-                  workingLabel="Applying..."
-                />
-              </div>
+              <button
+                className="mt-5 rounded-xl border border-outline-variant/24 bg-surface px-4 py-2.5 text-sm font-semibold text-on-surface-variant"
+                onClick={() =>
+                  showSecurityStatus(
+                    "Protection controls remain read-only here until native enforcement is implemented.",
+                    "warning",
+                  )
+                }
+                type="button"
+              >
+                Why editing is blocked
+              </button>
             </section>
           </div>
         </OverlayPanel>
@@ -1379,86 +1650,19 @@ function SecurityPage() {
 
 function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
   type ParserWorkspaceTab = "templates" | "sandbox" | "diagnostics";
-  type ParserTemplateStatus = "active" | "draft" | "fallback" | "disabled";
-  interface ParserTemplateCard {
-    id: string;
-    institutionKey: string;
-    institutionLabel: string;
-    institutionIcon: string;
-    name: string;
-    version: string;
-    updated: string;
-    status: ParserTemplateStatus;
-    regex: string;
-    note: string;
-    healthScore: number | null;
-    sourceType: "core" | "local";
-  }
-
-  const initialParserTemplates: ParserTemplateCard[] = [
-    {
-      id: "cbe_debit_v1",
-      institutionKey: "CBE",
-      institutionLabel: "Commercial Bank of Ethiopia",
-      institutionIcon: "account_balance",
-      name: "Debit Notification",
-      version: "v1.0.0",
-      updated: "Updated 2d ago",
-      status: "active",
-      regex:
-        "debited with ETB\\s(?<amount>[\\d,]+\\.\\d{2}).*?at\\s(?<merchant>.*?)\\.\\sBal ETB\\s(?<balance>[\\d,]+\\.\\d{2})",
-      note: "Primary debit route with running balance capture.",
-      healthScore: 99.2,
-      sourceType: "core",
-    },
-    {
-      id: "dashen_debit_v1",
-      institutionKey: "DashenBank",
-      institutionLabel: "Dashen Bank",
-      institutionIcon: "account_balance",
-      name: "Purchase Alert",
-      version: "v1.2.0",
-      updated: "Updated 5h ago",
-      status: "draft",
-      regex:
-        "debited from account\\s(?<account>[\\d*]+).*?at\\s(?<merchant>.*?)\\.\\sAvailable balance ETB\\s(?<balance>[\\d,]+\\.\\d{2})",
-      note: "Draft route being tuned for merchant extraction.",
-      healthScore: 84.7,
-      sourceType: "core",
-    },
-    {
-      id: "telebirr_paid_goods_v1",
-      institutionKey: "127",
-      institutionLabel: "Telebirr",
-      institutionIcon: "account_balance_wallet",
-      name: "Paid Goods",
-      version: "v1.4.3",
-      updated: "Updated 1w ago",
-      status: "active",
-      regex:
-        "ETB\\s(?<amount>[\\d,]+\\.\\d{2})\\spaid to\\s(?<merchant>.*?)\\sfrom wallet\\s(?<account>[\\d*]+).*?balance ETB\\s(?<balance>[\\d,]+\\.\\d{2})",
-      note: "Mobile-money payment route with wallet balance capture.",
-      healthScore: 97.6,
-      sourceType: "core",
-    },
-    {
-      id: "generic_credit_v1",
-      institutionKey: "BOA",
-      institutionLabel: "Bank of Abyssinia",
-      institutionIcon: "account_balance_wallet",
-      name: "Generic Credit Fallback",
-      version: "v0.9.5",
-      updated: "Updated 1w ago",
-      status: "fallback",
-      regex:
-        "(?<merchant>.*)\\s(?<amount>[\\d,]+\\.\\d{2}).*?(?<currency>ETB|USD)?.*?(?<balance>[\\d,]+\\.\\d{2})?",
-      note: "Fallback route for evolving sender formats.",
-      healthScore: 71.4,
-      sourceType: "core",
-    },
-  ];
+  const initialParserTemplates = useMemo(
+    () => cloneDefaultParserTemplates(),
+    [],
+  );
 
   const persistedWorkspace = useMemo(() => readParserWorkspacePreferences(), []);
+  const persistedResolvedTemplates = useMemo(
+    () =>
+      persistedWorkspace
+        ? resolveParserTemplateWorkspace(persistedWorkspace.templateWorkspace)
+        : initialParserTemplates,
+    [initialParserTemplates, persistedWorkspace],
+  );
   const [activeParserTab, setActiveParserTab] =
     useState<ParserWorkspaceTab>("templates");
   const [senderLabel, setSenderLabel] = useState<string>(
@@ -1469,15 +1673,12 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
   );
   const approvalQueue = useTransactionStore((state) => state.approvalQueue);
   const unmatchedMessages = useTransactionStore((state) => state.unmatchedMessages);
-  const [templateCards, setTemplateCards] = useState<ParserTemplateCard[]>(
-    persistedWorkspace?.templates.length
-      ? persistedWorkspace.templates
-      : initialParserTemplates,
+  const [templateCards, setTemplateCards] = useState<ParserTemplateDefinition[]>(
+    persistedResolvedTemplates,
   );
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>(
     persistedWorkspace?.selectedTemplateId ||
-      persistedWorkspace?.templates[0]?.id ||
-      initialParserTemplates[0]?.id ||
+      persistedResolvedTemplates[0]?.id ||
       "",
   );
   const [sandboxInputMode, setSandboxInputMode] = useState<"latest" | "manual">(
@@ -1504,24 +1705,29 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
     persistedWorkspace?.verboseLogging ?? false,
   );
   const [templateBuilderDraft, setTemplateBuilderDraft] = useState({
-    sender: "CBE",
-    name: "",
-    regex: "",
-    direction: "debit",
-    amountKey: "amount",
-    merchantKey: "merchant",
-    balanceKey: "balance",
-    feeKey: "fee",
-    vatKey: "vat",
-    accountKey: "account",
-    dateMode: "message_date",
+    ...createTemplateBuilderSeed(senderLabel),
   });
   const [statusToast, setStatusToast] = useState<{
     tone: StatusTone;
     message: string;
   } | null>(null);
   const parserPackInputRef = useRef<HTMLInputElement | null>(null);
-  const { previewResult, parseAndQueue } = useParser(rawInput, senderLabel);
+  const parserWorkspaceModel = useMemo(
+    () => migrateResolvedTemplatesToWorkspace(templateCards),
+    [templateCards],
+  );
+  const parserRuntimeOptions = useMemo(
+    () =>
+      buildParserRuntimeOptionsFromWorkspace(parserWorkspaceModel, {
+        preferredTemplateId: selectedTemplateId,
+        includeDraftTemplates: true,
+      }),
+    [parserWorkspaceModel, selectedTemplateId],
+  );
+  const { previewResult, parseAndQueue } = useParser(rawInput, senderLabel, {
+    runtime: parserRuntimeOptions,
+    verboseLogging,
+  });
   const openTransactionEditor = useTransactionStore(
     (state) => state.openTransactionEditor,
   );
@@ -1564,8 +1770,8 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
 
   useEffect(() => {
     persistParserWorkspacePreferences({
-      version: 1,
-      templates: templateCards,
+      version: 3,
+      templateWorkspace: parserWorkspaceModel,
       selectedTemplateId,
       senderLabel,
       strictSchemaParsing,
@@ -1575,11 +1781,11 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
     });
   }, [
     autoReconciliation,
+    parserWorkspaceModel,
     preserveRawSms,
     selectedTemplateId,
     senderLabel,
     strictSchemaParsing,
-    templateCards,
     verboseLogging,
   ]);
 
@@ -1590,6 +1796,10 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
       null,
     [selectedTemplateId, templateCards],
   );
+  const selectedTemplateInspection = useMemo(
+    () => (selectedTemplate ? inspectParserTemplate(selectedTemplate) : null),
+    [selectedTemplate],
+  );
 
   const groupedTemplates = useMemo(() => {
     const groups = new Map<
@@ -1597,17 +1807,18 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
       {
         label: string;
         icon: string;
-        templates: ParserTemplateCard[];
+        templates: ParserTemplateDefinition[];
       }
     >();
 
     for (const template of templateCards) {
-      const current = groups.get(template.institutionKey);
+      const groupKey = getInstitutionKeyForTemplate(template);
+      const current = groups.get(groupKey);
 
       if (current) {
         current.templates.push(template);
       } else {
-        groups.set(template.institutionKey, {
+        groups.set(groupKey, {
           label: template.institutionLabel,
           icon: template.institutionIcon,
           templates: [template],
@@ -1619,27 +1830,15 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
   }, [templateCards]);
 
   const parserSource = useMemo(() => {
-    if (!selectedTemplate) {
+    if (!selectedTemplate || !selectedTemplateInspection) {
       return "";
     }
 
-    return `1  function parseSMS(message) {
-2    const regex = /${selectedTemplate.regex}/i;
-3    const match = message.match(regex);
-4
-5    if (!match?.groups) {
-6      return null;
-7    }
-8
-9    return {
-10     amount: match.groups.${templateBuilderDraft.amountKey} ?? null,
-11     merchant: match.groups.${templateBuilderDraft.merchantKey} ?? null,
-12     balance: match.groups.${templateBuilderDraft.balanceKey} ?? null,
-13     fee: match.groups.${templateBuilderDraft.feeKey} ?? null,
-14     account: match.groups.${templateBuilderDraft.accountKey} ?? null,
-15   };
-16 }`;
-  }, [selectedTemplate, templateBuilderDraft.accountKey, templateBuilderDraft.amountKey, templateBuilderDraft.balanceKey, templateBuilderDraft.feeKey, templateBuilderDraft.merchantKey]);
+    return buildParserSourceFromBindings(
+      selectedTemplateInspection.bindings,
+      selectedTemplate,
+    );
+  }, [selectedTemplate, selectedTemplateInspection]);
 
   const previewRows = useMemo(() => {
     if (previewResult.status !== "matched") {
@@ -1698,7 +1897,7 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
     const supportedInstitutions = new Set(
       templateCards
         .filter((template) => template.status !== "disabled")
-        .map((template) => template.institutionKey),
+        .map((template) => getInstitutionKeyForTemplate(template)),
     );
     return Math.round(
       (supportedInstitutions.size / parserSenderOptions.length) * 100,
@@ -1727,7 +1926,7 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
       );
       setSaveState("done");
       showParserStatus(
-        "Template workspace saved locally on this device.",
+        "Template workspace saved into parser authority state on this phone.",
         "success",
       );
       setTimeout(() => setSaveState("idle"), 1200);
@@ -1786,7 +1985,7 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
   }
 
   function updateSelectedTemplate(
-    updater: (template: ParserTemplateCard) => ParserTemplateCard,
+    updater: (template: ParserTemplateDefinition) => ParserTemplateDefinition,
   ) {
     if (!selectedTemplate) {
       return;
@@ -1804,7 +2003,7 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
       return;
     }
 
-    const duplicatedTemplate: ParserTemplateCard = {
+    const duplicatedTemplate: ParserTemplateDefinition = {
       ...selectedTemplate,
       id: `${selectedTemplate.id}-copy-${Date.now()}`,
       name: `${selectedTemplate.name} Copy`,
@@ -1812,10 +2011,12 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
       updated: "Updated just now",
       status: "draft",
       sourceType: "local",
+      senderAliases: [...selectedTemplate.senderAliases],
     };
 
     setTemplateCards((current) => [duplicatedTemplate, ...current]);
     setSelectedTemplateId(duplicatedTemplate.id);
+    setSenderLabel(getInstitutionKeyForTemplate(duplicatedTemplate));
     showParserStatus("Duplicated the selected template into a local draft.", "success");
   }
 
@@ -1826,7 +2027,10 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
 
     setTemplateCards((current) =>
       current.map((template) => {
-        if (template.institutionKey !== selectedTemplate.institutionKey) {
+        if (
+          getInstitutionKeyForTemplate(template) !==
+          getInstitutionKeyForTemplate(selectedTemplate)
+        ) {
           return template;
         }
 
@@ -1884,35 +2088,58 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
       return;
     }
 
-    const senderOption =
-      parserSenderOptions.find((option) => option.value === templateBuilderDraft.sender) ??
-      parserSenderOptions[0];
+    const senderOption = getParserSenderOption(templateBuilderDraft.sender);
 
-    const nextTemplate: ParserTemplateCard = {
+    const nextTemplate: ParserTemplateDefinition = {
       id: `${senderOption.value.toLowerCase()}-draft-${Date.now()}`,
+      financialInstitution: senderOption.financialInstitution,
       institutionKey: senderOption.value,
       institutionLabel: senderOption.label,
-      institutionIcon:
-        senderOption.value === "127" ? "account_balance_wallet" : "account_balance",
+      institutionIcon: senderOption.icon,
+      senderAliases: [senderOption.value],
+      accountIdentifiers: [],
+      identityTextFragments: [],
       name: templateBuilderDraft.name.trim(),
       version: "v0.1.0",
       updated: "Updated just now",
       status: "draft",
       regex: templateBuilderDraft.regex.trim(),
-      note: `${templateBuilderDraft.direction} route with ${templateBuilderDraft.amountKey}, ${templateBuilderDraft.merchantKey}, ${templateBuilderDraft.balanceKey}`,
+      note: "",
       healthScore: null,
       sourceType: "local",
+      templateKind: "custom",
+      builtInTemplateId: undefined,
+      engineEditable: true,
+      userProfile: {
+        senderAliases: [senderOption.value],
+        accountIdentifiers: [],
+        identityTextFragments: [],
+      },
+      direction: templateBuilderDraft.direction,
+      amountKey: templateBuilderDraft.amountKey.trim() || "amount",
+      merchantKey: templateBuilderDraft.merchantKey.trim() || undefined,
+      balanceKey: templateBuilderDraft.balanceKey.trim() || undefined,
+      feeKey: templateBuilderDraft.feeKey.trim() || undefined,
+      vatKey: templateBuilderDraft.vatKey.trim() || undefined,
+      accountKey: templateBuilderDraft.accountKey.trim() || undefined,
+      referenceKey: templateBuilderDraft.referenceKey.trim() || undefined,
+      dateKey: templateBuilderDraft.dateKey.trim() || undefined,
+      timeKey: templateBuilderDraft.timeKey.trim() || undefined,
+      meridiemKey: templateBuilderDraft.meridiemKey.trim() || undefined,
+      dateMode: templateBuilderDraft.dateMode,
+      accountChannel:
+        senderOption.financialInstitution === "telebirr" ||
+        senderOption.financialInstitution === "cbebirr"
+          ? "mobile_money"
+          : "bank",
     };
+    nextTemplate.note = buildParserTemplateNote(nextTemplate);
 
     setTemplateCards((current) => [nextTemplate, ...current]);
     setSelectedTemplateId(nextTemplate.id);
     setSenderLabel(senderOption.value);
     setIsTemplateBuilderOpen(false);
-    setTemplateBuilderDraft((current) => ({
-      ...current,
-      name: "",
-      regex: "",
-    }));
+    setTemplateBuilderDraft(createTemplateBuilderSeed(senderOption.value));
     showParserStatus("Created a new local draft template.", "success");
   }
 
@@ -1960,7 +2187,7 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
       const text = await file.text();
       const parsed = JSON.parse(text) as {
         kind?: string;
-        templates?: ParserTemplateCard[];
+        templates?: ParserTemplateDefinition[];
         settings?: {
           strictSchemaParsing?: boolean;
           preserveRawSms?: boolean;
@@ -1975,6 +2202,7 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
 
       setTemplateCards(parsed.templates);
       setSelectedTemplateId(parsed.templates[0]?.id ?? "");
+      setSenderLabel(getInstitutionKeyForTemplate(parsed.templates[0] ?? initialParserTemplates[0]!));
       setStrictSchemaParsing(parsed.settings?.strictSchemaParsing ?? true);
       setPreserveRawSms(parsed.settings?.preserveRawSms ?? true);
       setAutoReconciliation(parsed.settings?.autoReconciliation ?? false);
@@ -1990,14 +2218,18 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
 
   function handlePurgeParserCache() {
     clearParserWorkspacePreferences();
-    setTemplateCards(initialParserTemplates);
+    setTemplateCards(cloneDefaultParserTemplates());
     setSelectedTemplateId(initialParserTemplates[0]?.id ?? "");
     setSenderLabel("CBE");
     setStrictSchemaParsing(true);
     setPreserveRawSms(true);
     setAutoReconciliation(false);
     setVerboseLogging(false);
-    showParserStatus("Reset local parser cache and preview controls.", "warning");
+    setTemplateBuilderDraft(createTemplateBuilderSeed("CBE"));
+    showParserStatus(
+      "Reset parser authority workspace and preview controls.",
+      "warning",
+    );
   }
 
   return (
@@ -2109,7 +2341,10 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
                             : "border-outline-variant/20 bg-surface-container-low hover:shadow-md"
                         } ${pressableClass}`}
                         key={template.id}
-                        onClick={() => setSelectedTemplateId(template.id)}
+                        onClick={() => {
+                          setSelectedTemplateId(template.id);
+                          setSenderLabel(getInstitutionKeyForTemplate(template));
+                        }}
                         type="button"
                       >
                         <div className="mb-4 flex items-start justify-between gap-4">
@@ -2738,7 +2973,7 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
                   onChange={(event) =>
                     setTemplateBuilderDraft((current) => ({
                       ...current,
-                      direction: event.target.value,
+                      direction: event.target.value as TransactionDirection,
                     }))
                   }
                   value={templateBuilderDraft.direction}
@@ -2846,6 +3081,70 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
               </label>
               <label className="block">
                 <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Reference key
+                </span>
+                <input
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      referenceKey: event.target.value,
+                    }))
+                  }
+                  type="text"
+                  value={templateBuilderDraft.referenceKey}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Date key
+                </span>
+                <input
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      dateKey: event.target.value,
+                    }))
+                  }
+                  type="text"
+                  value={templateBuilderDraft.dateKey}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Time key
+                </span>
+                <input
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      timeKey: event.target.value,
+                    }))
+                  }
+                  type="text"
+                  value={templateBuilderDraft.timeKey}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
+                  Meridiem key
+                </span>
+                <input
+                  className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                  onChange={(event) =>
+                    setTemplateBuilderDraft((current) => ({
+                      ...current,
+                      meridiemKey: event.target.value,
+                    }))
+                  }
+                  type="text"
+                  value={templateBuilderDraft.meridiemKey}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold text-on-surface">
                   Date mode
                 </span>
                 <select
@@ -2853,7 +3152,7 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
                   onChange={(event) =>
                     setTemplateBuilderDraft((current) => ({
                       ...current,
-                      dateMode: event.target.value,
+                      dateMode: event.target.value as ParserTemplateDateMode,
                     }))
                   }
                   value={templateBuilderDraft.dateMode}
@@ -2901,6 +3200,160 @@ function ParsingPage({ onOpenTab }: { onOpenTab: (tabId: AppTabId) => void }) {
                 {selectedTemplate?.institutionLabel ?? "Unknown sender"}
               </StatusChip>
             </div>
+            {selectedTemplate ? (
+              <div className="grid gap-4 lg:grid-cols-2">
+                <label className="block">
+                  <span className="mb-2 block text-sm font-semibold text-on-surface">
+                    Template name
+                  </span>
+                  <input
+                    className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                    onChange={(event) =>
+                      updateSelectedTemplate((template) => ({
+                        ...template,
+                        name: event.target.value,
+                        updated: "Updated just now",
+                      }))
+                    }
+                    type="text"
+                    value={selectedTemplate.name}
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-sm font-semibold text-on-surface">
+                    Status
+                  </span>
+                  <select
+                    className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                    onChange={(event) =>
+                      updateSelectedTemplate((template) => ({
+                        ...template,
+                        status: event.target.value as ParserTemplateStatus,
+                        updated: "Updated just now",
+                      }))
+                    }
+                    value={selectedTemplate.status}
+                  >
+                    <option value="active">Active</option>
+                    <option value="fallback">Fallback</option>
+                    <option value="draft">Draft</option>
+                    <option value="disabled">Disabled</option>
+                  </select>
+                </label>
+                <label className="block lg:col-span-2">
+                  <span className="mb-2 block text-sm font-semibold text-on-surface">
+                    Note
+                  </span>
+                  <input
+                    className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                    onChange={(event) =>
+                      updateSelectedTemplate((template) => ({
+                        ...template,
+                        note: event.target.value,
+                        updated: "Updated just now",
+                      }))
+                    }
+                    type="text"
+                    value={selectedTemplate.note}
+                  />
+                </label>
+                <label className="block lg:col-span-2">
+                  <span className="mb-2 block text-sm font-semibold text-on-surface">
+                    Regex
+                  </span>
+                  <textarea
+                    className="h-32 w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 font-mono text-sm text-on-surface"
+                    onChange={(event) =>
+                      updateSelectedTemplate((template) => ({
+                        ...template,
+                        regex: event.target.value,
+                        updated: "Updated just now",
+                      }))
+                    }
+                    value={selectedTemplate.regex}
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-sm font-semibold text-on-surface">
+                    Direction
+                  </span>
+                  <select
+                    className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                    onChange={(event) =>
+                      updateSelectedTemplate((template) => ({
+                        ...template,
+                        direction: event.target.value as TransactionDirection,
+                        note: buildParserTemplateNote({
+                          ...template,
+                          direction: event.target.value as TransactionDirection,
+                        }),
+                        updated: "Updated just now",
+                      }))
+                    }
+                    value={selectedTemplate.direction}
+                  >
+                    <option value="debit">Debit</option>
+                    <option value="credit">Credit</option>
+                    <option value="transfer">Transfer</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-sm font-semibold text-on-surface">
+                    Date mode
+                  </span>
+                  <select
+                    className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                    onChange={(event) =>
+                      updateSelectedTemplate((template) => ({
+                        ...template,
+                        dateMode: event.target.value as ParserTemplateDateMode,
+                        updated: "Updated just now",
+                      }))
+                    }
+                    value={selectedTemplate.dateMode}
+                  >
+                    <option value="message_date">Use message date</option>
+                    <option value="captured_at">Use captured timestamp</option>
+                  </select>
+                </label>
+                {[
+                  ["Amount key", "amountKey"],
+                  ["Merchant key", "merchantKey"],
+                  ["Balance key", "balanceKey"],
+                  ["Fee key", "feeKey"],
+                  ["VAT key", "vatKey"],
+                  ["Account key", "accountKey"],
+                  ["Reference key", "referenceKey"],
+                  ["Date key", "dateKey"],
+                  ["Time key", "timeKey"],
+                  ["Meridiem key", "meridiemKey"],
+                ].map(([label, field]) => (
+                  <label className="block" key={field}>
+                    <span className="mb-2 block text-sm font-semibold text-on-surface">
+                      {label}
+                    </span>
+                    <input
+                      className="w-full rounded-xl border border-outline-variant/30 bg-surface px-4 py-3 text-on-surface"
+                      onChange={(event) =>
+                        updateSelectedTemplate((template) => {
+                          const nextTemplate = {
+                            ...template,
+                            [field]: event.target.value.trim() || undefined,
+                            updated: "Updated just now",
+                          } as ParserTemplateDefinition;
+                          return {
+                            ...nextTemplate,
+                            note: buildParserTemplateNote(nextTemplate),
+                          };
+                        })
+                      }
+                      type="text"
+                      value={(selectedTemplate[field as keyof ParserTemplateDefinition] as string | undefined) ?? ""}
+                    />
+                  </label>
+                ))}
+              </div>
+            ) : null}
             <section className="min-h-[72vh] overflow-hidden rounded-[24px] border border-outline-variant/20 bg-[#2e3230]">
               <pre className="h-full overflow-auto p-5 font-mono text-sm leading-7 text-[#eae6de]">
                 <code>{parserSource}</code>
@@ -3379,211 +3832,78 @@ function ConnectDevicePage({
 }: {
   onOpenPage: (pageId: SettingsPageId) => void;
 }) {
-  const nearbySyncDevices = useTransactionStore((state) => state.nearbySyncDevices);
-  const pairingCodeState = useTransactionStore((state) => state.pairingCodeState);
-  const updatePairingCodeInput = useTransactionStore(
-    (state) => state.updatePairingCodeInput,
-  );
-  const submitPairingCode = useTransactionStore((state) => state.submitPairingCode);
-  const [manualConnectState, setManualConnectState] =
-    useState<ActionState>("idle");
-  const [scannerState, setScannerState] = useState<ActionState>("idle");
-  const [statusToast, setStatusToast] = useState<{
-    tone: StatusTone;
-    message: string;
-  } | null>(null);
-  const [now, setNow] = useState(() => Date.now());
-
-  const codeDigits = pairingCodeState.pendingCodeInput
-    .padEnd(6, " ")
-    .slice(0, 6)
-    .split("");
-  const expiresAt = new Date(pairingCodeState.expiresAt).getTime();
-  const remainingMinutes = Math.max(
-    0,
-    Math.ceil((expiresAt - now) / (60 * 1000)),
-  );
-  const pairingWindowLabel =
-    remainingMinutes > 0
-      ? `Current pairing window expires in about ${remainingMinutes} minute${
-          remainingMinutes === 1 ? "" : "s"
-        }.`
-      : "Current pairing window expired. Generate a fresh code from the source device.";
-
-  useEffect(() => {
-    const intervalId = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(intervalId);
-  }, []);
-
-  function showConnectStatus(message: string, tone: StatusTone) {
-    setStatusToast({ message, tone });
-    setTimeout(() => setStatusToast(null), 2400);
-  }
-
-  function updateCodeDigit(index: number, value: string) {
-    const next = pairingCodeState.pendingCodeInput
-      .padEnd(6, " ")
-      .slice(0, 6)
-      .split("");
-
-    next[index] = value.replace(/\s/g, "").slice(-1);
-    updatePairingCodeInput(next.join("").trimEnd());
-  }
-
-  function handleManualConnect() {
-    setManualConnectState("working");
-
-    setTimeout(() => {
-      const pairedDevice = submitPairingCode();
-      const nextPairingState = transactionStore.getState().pairingCodeState;
-
-      if (pairedDevice) {
-        setManualConnectState("done");
-        showConnectStatus(
-          pairedDevice.deviceId.startsWith("code-paired-")
-            ? `${pairedDevice.displayName} is now available as a local preview route in Sync.`
-            : `${pairedDevice.displayName} is now trusted and available in Sync.`,
-          "success",
-        );
-        setTimeout(() => {
-          setManualConnectState("idle");
-          onOpenPage("sync");
-        }, 850);
-        return;
-      }
-
-      setManualConnectState("idle");
-      showConnectStatus(
-        nextPairingState.errorMessage ??
-          "That pairing code could not be trusted yet.",
-        "error",
-      );
-    }, 700);
-  }
-
-  function handleScannerOpen() {
-    setScannerState("working");
-
-    setTimeout(() => {
-      setScannerState("idle");
-      showConnectStatus(
-        nearbySyncDevices.length > 0
-          ? `${nearbySyncDevices.length} nearby device${
-              nearbySyncDevices.length === 1 ? "" : "s"
-            } already appeared in Sync. Use the 6-digit code below or pair from the Sync page while camera scanning is being wired.`
-          : "Camera scanning is not wired in this build yet. Start nearby discovery from Sync or use the 6-digit code below.",
-        "warning",
-      );
-    }, 700);
-  }
-
   return (
-    <section className="mx-auto max-w-md space-y-6">
-      {statusToast ? (
-        <StatusToast message={statusToast.message} tone={statusToast.tone} />
-      ) : null}
-      <div className="text-center">
-        <h2 className="font-headline text-2xl text-on-surface">
-          Pair a New Device
+    <section className="mx-auto max-w-3xl space-y-6">
+      <MotionPanel className="space-y-2">
+        <h2 className="font-headline text-3xl font-semibold text-on-surface">
+          Device pairing is hidden in this alpha
         </h2>
-        <p className="mt-2 text-sm text-on-surface-variant">
-          Securely connect a nearby device or a local preview route to your wallet
-          workspace.
+        <p className="text-sm leading-6 text-on-surface-variant">
+          Discovery and sync status stay visible. QR and code pairing stay off
+          until Android transport is ready.
         </p>
-      </div>
+      </MotionPanel>
 
-      <section className="flex flex-col items-center rounded-xl border border-outline-variant/30 bg-surface-container-low p-6 shadow-sm">
-        <div className="mb-4">
-          <MaterialSymbol
-            className="mb-2 block text-center text-4xl text-primary"
-            filled
-            name="qr_code_scanner"
-          />
-          <h3 className="text-center font-headline text-lg text-on-surface">
-            Scan QR Code
-          </h3>
-          <p className="mt-1 text-center text-sm text-on-surface-variant">
-            Point your camera at the desktop pairing screen.
-          </p>
-        </div>
-        <div className="mb-4 rounded-2xl bg-surface p-4 text-left">
-          <p className="text-sm font-semibold text-on-surface">
-            Pairing window
-          </p>
-          <p className="mt-2 text-sm leading-6 text-on-surface-variant">
-            {pairingWindowLabel}
-          </p>
-        </div>
-        <div className="mb-6 flex h-48 w-48 items-center justify-center rounded-xl border-2 border-dashed border-outline-variant bg-surface-container-high">
-          <div className="grid grid-cols-4 gap-1 rounded-lg bg-surface p-4 shadow-sm">
-            {Array.from({ length: 16 }).map((_, index) => (
-              <div
-                className={`h-5 w-5 rounded-sm ${
-                  index % 3 === 0 ? "bg-primary" : "bg-surface-container-high"
-                }`}
-                key={index}
-              />
-            ))}
+      <MotionPanel className="rounded-[28px] border border-outline-variant/20 bg-surface-container p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
+        <div className="flex items-start gap-4">
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-surface text-tertiary">
+            <MaterialSymbol className="text-[28px]" filled name="devices" />
           </div>
-        </div>
-        <ActionStatusButton
-          actionState={scannerState}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 font-bold text-on-primary"
-          doneLabel="Scanned"
-          idleLabel="Open Scanner"
-          onClick={handleScannerOpen}
-          workingLabel="Opening..."
-        />
-      </section>
-
-      <div className="flex items-center gap-4 py-2">
-        <div className="h-px flex-1 bg-outline-variant/50" />
-        <span className="text-xs font-semibold uppercase tracking-wider text-on-surface-variant">
-          Or
-        </span>
-        <div className="h-px flex-1 bg-outline-variant/50" />
-      </div>
-
-      <section className="rounded-xl border border-outline-variant/30 bg-surface-container-low p-6 shadow-sm">
-        <div className="mb-4 flex items-start gap-3">
-          <MaterialSymbol className="text-tertiary" name="keyboard" />
-          <div>
-            <h3 className="font-headline text-lg text-on-surface">
-              Enter Device Code
-            </h3>
-            <p className="text-sm text-on-surface-variant">
-              Type the 6-digit PIN displayed on the source device.
+          <div className="space-y-3">
+            <p className="text-sm font-semibold text-on-surface">
+              What you can do right now
+            </p>
+            <p className="text-sm leading-6 text-on-surface-variant">
+              Use Sync to inspect discovery, trusted devices, and manual
+              refresh.
             </p>
           </div>
         </div>
-        <div className="mb-3 flex justify-between gap-2">
-          {codeDigits.map((digit, index) => (
-            <input
-              aria-label={`Pairing digit ${index + 1}`}
-              className="h-14 w-12 rounded-lg border border-outline-variant bg-surface text-center text-xl font-bold text-on-surface outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
-              key={index}
-              maxLength={1}
-              onChange={(event) => updateCodeDigit(index, event.target.value)}
-              placeholder="0"
-              type="text"
-              value={digit.trim()}
-            />
-          ))}
+
+        <div className="mt-6">
+          <button
+            className="inline-flex min-h-12 items-center justify-center rounded-2xl border border-outline-variant/30 bg-surface px-5 py-3 text-sm font-semibold text-primary transition active:scale-[0.99]"
+            onClick={() => onOpenPage("sync")}
+            type="button"
+          >
+            Back to Sync
+          </button>
         </div>
-        {pairingCodeState.errorMessage ? (
-          <p className="mb-4 text-xs font-medium text-error">
-            {pairingCodeState.errorMessage}
-          </p>
-        ) : null}
-        <ActionStatusButton
-          actionState={manualConnectState}
-          className="w-full rounded-xl border border-primary bg-surface-container-high px-4 py-3 font-bold text-primary"
-          doneLabel="Trusted"
-          idleLabel="Connect"
-          onClick={handleManualConnect}
-          workingLabel="Connecting..."
-        />
-      </section>
+      </MotionPanel>
+    </section>
+  );
+}
+
+function AdvancedBoundaryPage() {
+  return (
+    <section className="mx-auto max-w-3xl space-y-6">
+      <MotionPanel className="space-y-2">
+        <h2 className="font-headline text-3xl font-semibold text-on-surface">
+          Advanced controls are hidden in this alpha
+        </h2>
+        <p className="text-sm leading-6 text-on-surface-variant">
+          API keys, webhooks, and experimental runtime controls stay hidden
+          until they have real mobile backing.
+        </p>
+      </MotionPanel>
+
+      <MotionPanel className="rounded-[28px] border border-outline-variant/20 bg-surface-container p-6 shadow-[0_4px_20px_rgba(46,50,48,0.06)]">
+        <div className="flex items-start gap-4">
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-surface text-on-surface-variant">
+            <MaterialSymbol className="text-[28px]" filled name="settings_suggest" />
+          </div>
+          <div className="space-y-3">
+            <p className="text-sm font-semibold text-on-surface">
+              Hidden until backed by real product state
+            </p>
+            <p className="text-sm leading-6 text-on-surface-variant">
+              This includes trust or pairing secrets, webhook endpoints, API
+              keys, parser-debug purges, and similar controls that would
+              otherwise look live but still be preview-only.
+            </p>
+          </div>
+        </div>
+      </MotionPanel>
     </section>
   );
 }
@@ -3604,31 +3924,6 @@ function SyncPage({
     (state) => state.trustedSyncDevices,
   );
   const syncActivity = useTransactionStore((state) => state.syncActivity);
-  const toggleSyncEnabled = useTransactionStore((state) => state.toggleSyncEnabled);
-  const setSyncMode = useTransactionStore((state) => state.setSyncMode);
-  const startSyncDiscovery = useTransactionStore(
-    (state) => state.startSyncDiscovery,
-  );
-  const stopSyncDiscovery = useTransactionStore((state) => state.stopSyncDiscovery);
-  const triggerManualSync = useTransactionStore(
-    (state) => state.triggerManualSync,
-  );
-  const pairNearbyDevice = useTransactionStore((state) => state.pairNearbyDevice);
-  const markTrustedDeviceAsPrimary = useTransactionStore(
-    (state) => state.markTrustedDeviceAsPrimary,
-  );
-  const removeTrustedDevice = useTransactionStore(
-    (state) => state.removeTrustedDevice,
-  );
-  const [statusToast, setStatusToast] = useState<{
-    tone: StatusTone;
-    message: string;
-  } | null>(null);
-  const [refreshState, setRefreshState] = useState<ActionState>("idle");
-  const [connectingNearbyId, setConnectingNearbyId] = useState<string | null>(
-    null,
-  );
-  const [trustedNearbyId, setTrustedNearbyId] = useState<string | null>(null);
 
   const primaryTrustedDevice =
     trustedSyncDevices.find((device) => device.isPrimary) ??
@@ -3638,79 +3933,21 @@ function SyncPage({
     syncActivity.find((entry) => entry.type === "sync") ?? null;
   const recentSyncActivity = syncActivity.slice(0, 5);
 
-  function showSyncStatus(message: string, tone: StatusTone) {
-    setStatusToast({ message, tone });
-    setTimeout(() => setStatusToast(null), 2400);
-  }
-
-  function handleManualRefresh() {
-    setRefreshState("working");
-
-    setTimeout(() => {
-      triggerManualSync();
-      const latestEntry = transactionStore.getState().syncActivity[0];
-      const isSuccess = latestEntry?.status === "success";
-
-      if (isSuccess) {
-        setRefreshState("done");
-        setTimeout(() => setRefreshState("idle"), 1200);
-      } else {
-        setRefreshState("idle");
-      }
-
-      showSyncStatus(
-        latestEntry?.detail ?? "Sync status refreshed.",
-        isSuccess ? "success" : "warning",
-      );
-    }, 700);
-  }
-
-  function handleMakePrimary(deviceId: string, displayName: string) {
-    markTrustedDeviceAsPrimary(deviceId);
-    showSyncStatus(`${displayName} is now the primary sync route.`, "success");
-  }
-
-  function handleDisconnect(deviceId: string, displayName: string) {
-    removeTrustedDevice(deviceId);
-    showSyncStatus(`${displayName} was removed from trusted devices.`, "warning");
-  }
-
-  function handlePairNearby(device: NearbySyncDevice) {
-    setConnectingNearbyId(device.deviceId);
-
-    setTimeout(() => {
-      const trustedDevice = pairNearbyDevice(device.deviceId);
-      setConnectingNearbyId(null);
-
-      if (trustedDevice) {
-        setTrustedNearbyId(device.deviceId);
-        showSyncStatus(
-          `${trustedDevice.displayName} moved into your trusted routes.`,
-          "success",
-        );
-        setTimeout(() => setTrustedNearbyId(null), 1200);
-        return;
-      }
-
-      showSyncStatus(
-        "That nearby device was not available anymore. Start discovery again.",
-        "error",
-      );
-    }, 700);
-  }
-
   return (
     <section className="space-y-8">
-      {statusToast ? (
-        <StatusToast message={statusToast.message} tone={statusToast.tone} />
-      ) : null}
       <header className="mb-10">
-        <h2 className="font-headline text-3xl font-bold text-on-surface md:text-4xl">
-          Sync &amp; Devices
-        </h2>
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="font-headline text-3xl font-bold text-on-surface md:text-4xl">
+            Sync &amp; Devices
+          </h2>
+          <StatusChip icon="visibility" tone="warning">
+            Local preview only
+          </StatusChip>
+        </div>
         <p className="mt-2 text-lg text-on-surface-variant">
-          Manage local authority connectivity and trusted hardware surfaces in
-          one grounded space.
+          Transport-backed sync is not active in this alpha. This page stays
+          read-only so the app stops pretending local preview arrays are a real
+          network path.
         </p>
       </header>
 
@@ -3783,32 +4020,41 @@ function SyncPage({
                   </p>
                   <p className="text-xs text-on-surface-variant">
                     {primaryTrustedDevice
-                      ? `${formatPlatformLabel(primaryTrustedDevice.platform)} • ${syncStatusSummary.headline}`
-                      : "Discover or trust a desktop route to set a primary path."}
+                      ? `${formatPlatformLabel(primaryTrustedDevice.platform)} • ${sanitizeAlphaSyncCopy(syncStatusSummary.headline)}`
+                      : "No transport-backed primary path exists yet on this phone."}
                   </p>
                 </div>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  className="rounded-lg bg-primary/10 px-4 py-2 text-sm font-semibold text-primary"
-                  onClick={() =>
-                    syncDiscoveryState === "searching"
-                      ? stopSyncDiscovery()
-                      : startSyncDiscovery()
-                  }
-                  type="button"
-                >
-                  {syncDiscoveryState === "searching"
-                    ? "Stop discovery"
-                    : "Discover nearby"}
-                </button>
-                <button
-                  className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary"
-                  onClick={() => onOpenPage("connect-device")}
-                  type="button"
-                >
-                  Add Device
-                </button>
+              <StatusChip icon="sync_disabled" tone="warning">
+                Transport pending
+              </StatusChip>
+            </div>
+
+            <div className="mt-6 rounded-[24px] border border-tertiary/20 bg-tertiary-container/25 p-5">
+              <div className="flex items-start gap-3">
+                <MaterialSymbol
+                  className="mt-0.5 text-[20px] text-tertiary"
+                  filled
+                  name="info"
+                />
+                <div>
+                  <p className="text-sm font-semibold text-on-surface">
+                    Pairing stays hidden in this alpha
+                  </p>
+                  <p className="mt-2 text-sm leading-6 text-on-surface-variant">
+                    The phone can show locally stored preview status, but QR
+                    pairing, manual device codes, discovery toggles, and
+                    trust-changing actions stay hidden until the Android
+                    transport and verification flow are fully backed.
+                  </p>
+                  <button
+                    className="mt-4 rounded-lg border border-outline-variant/24 bg-surface px-4 py-2 text-sm font-semibold text-primary"
+                    onClick={() => onOpenPage("connect-device")}
+                    type="button"
+                  >
+                    Why pairing is hidden
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -3820,7 +4066,8 @@ function SyncPage({
               Network Health
             </h3>
             <p className="mb-6 mt-2 text-sm text-on-surface-variant">
-              Overall system posture based on your local authority route.
+              Overall posture from the routes and status already stored on this
+              phone.
             </p>
             <div className="space-y-4">
               <div className="flex items-center justify-between">
@@ -3843,41 +4090,10 @@ function SyncPage({
               </div>
             </div>
           </div>
-          <div className="mt-8 grid gap-3">
-            <ActionStatusButton
-              actionState={refreshState}
-              className="flex w-full items-center justify-center gap-2 rounded-xl border border-primary/20 bg-surface py-3 font-semibold text-primary"
-              doneLabel="Refreshed"
-              idleLabel="Refresh Status"
-              onClick={handleManualRefresh}
-              workingLabel="Refreshing..."
-            />
-            <div className="flex items-center justify-between rounded-xl bg-surface p-3">
-              <span className="text-sm font-medium text-on-surface">
-                Sync enabled
-              </span>
-              <SwitchButton
-                ariaLabel="Toggle sync enabled"
-                checked={syncEnabled}
-                onToggle={toggleSyncEnabled}
-              />
-            </div>
-            <div className="flex overflow-hidden rounded-xl border border-outline-variant/30 bg-surface">
-              {(["automatic", "manual"] as const).map((mode) => (
-                <button
-                  className={`flex-1 py-3 text-sm font-medium capitalize ${
-                    syncMode === mode
-                      ? "bg-primary-container/20 font-semibold text-primary"
-                      : "text-on-surface-variant"
-                  }`}
-                  key={mode}
-                  onClick={() => setSyncMode(mode)}
-                  type="button"
-                >
-                  {mode}
-                </button>
-              ))}
-            </div>
+          <div className="mt-8 rounded-xl border border-outline-variant/20 bg-surface p-4 text-sm leading-6 text-on-surface-variant">
+            Sync enabled, mode, discovery, and refresh remain read-only until
+            the transport lane exists. Use this surface to inspect posture, not
+            to drive local simulator state.
           </div>
         </section>
 
@@ -3889,17 +4105,10 @@ function SyncPage({
                 Connected Devices
               </h3>
               <p className="mt-1 text-sm text-on-surface-variant">
-                Manage trusted routes and discovered nearby devices.
+                Read-only visibility into locally stored trusted-route previews
+                and discovered-device placeholders.
               </p>
             </div>
-            <button
-              className="flex items-center justify-center gap-2 rounded-xl bg-primary px-6 py-3 font-semibold text-on-primary"
-              onClick={() => onOpenPage("connect-device")}
-              type="button"
-            >
-              <MaterialSymbol name="add" />
-              Add Device
-            </button>
           </div>
 
           <div className="grid gap-6 md:grid-cols-2">
@@ -3929,29 +4138,10 @@ function SyncPage({
                     {formatShortDateTime(device.lastSyncedAt)}
                   </p>
                   <div className="flex gap-3">
-                    <button
-                      className={`text-sm font-semibold ${
-                        device.isPrimary
-                          ? "text-on-surface-variant"
-                          : "text-primary hover:underline"
-                      }`}
-                      disabled={device.isPrimary}
-                      onClick={() =>
-                        handleMakePrimary(device.deviceId, device.displayName)
-                      }
-                      type="button"
-                    >
-                      {device.isPrimary ? "Primary route" : "Set primary"}
-                    </button>
-                    <button
-                      className="text-sm font-semibold text-error hover:underline"
-                      onClick={() =>
-                        handleDisconnect(device.deviceId, device.displayName)
-                      }
-                      type="button"
-                    >
-                      Disconnect
-                    </button>
+                    <span className="inline-flex items-center gap-2 text-sm font-semibold text-primary">
+                      <MaterialSymbol className="text-[18px]" filled name="check" />
+                      {device.isPrimary ? "Primary route" : "Trusted"}
+                    </span>
                   </div>
                 </div>
               </article>
@@ -3982,25 +4172,10 @@ function SyncPage({
                     {formatPlatformLabel(device.platform)} • {device.statusLabel}
                   </p>
                   <div className="flex gap-3">
-                    {connectingNearbyId === device.deviceId ? (
-                      <span className="inline-flex items-center gap-2 text-sm font-semibold text-primary">
-                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-r-transparent" />
-                        Pairing...
-                      </span>
-                    ) : trustedNearbyId === device.deviceId ? (
-                      <span className="inline-flex items-center gap-2 text-sm font-semibold text-primary">
-                        <MaterialSymbol className="text-[18px]" filled name="check" />
-                        Trusted
-                      </span>
-                    ) : (
-                      <button
-                        className="text-sm font-semibold text-primary hover:underline"
-                        onClick={() => handlePairNearby(device)}
-                        type="button"
-                      >
-                        Pair now
-                      </button>
-                    )}
+                    <span className="inline-flex items-center gap-2 text-sm font-semibold text-on-surface-variant">
+                      <MaterialSymbol className="text-[18px]" name="visibility" />
+                      Visible only
+                    </span>
                   </div>
                 </div>
               </article>
@@ -4009,8 +4184,7 @@ function SyncPage({
 
           {trustedSyncDevices.length === 0 && nearbySyncDevices.length === 0 ? (
             <div className="mt-6 rounded-xl border border-dashed border-outline-variant bg-surface-container-low p-4 text-sm text-on-surface-variant">
-              No devices are available yet. Start discovery or open Connect
-              Device to pair one manually.
+              No preview devices are stored on this phone yet.
             </div>
           ) : null}
         </section>
@@ -4022,17 +4196,9 @@ function SyncPage({
                 Recent sync activity
               </h3>
               <p className="mt-2 text-sm text-on-surface-variant">
-                The latest local discovery, trust, and sync events from this
-                phone.
+                Preview events already stored on this phone.
               </p>
             </div>
-            <button
-              className="rounded-lg border border-outline-variant/30 bg-surface px-4 py-2 text-sm font-semibold text-on-surface"
-              onClick={() => onOpenPage("connect-device")}
-              type="button"
-            >
-              Open pairing
-            </button>
           </div>
 
           <div className="mt-5 space-y-3">
@@ -4045,10 +4211,10 @@ function SyncPage({
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <p className="text-sm font-semibold text-on-surface">
-                        {entry.title}
+                        {sanitizeAlphaSyncCopy(entry.title)}
                       </p>
                       <p className="mt-1 text-sm leading-6 text-on-surface-variant">
-                        {entry.detail}
+                        {sanitizeAlphaSyncCopy(entry.detail)}
                       </p>
                     </div>
                     <span
@@ -4070,8 +4236,8 @@ function SyncPage({
               ))
             ) : (
               <div className="rounded-2xl border border-dashed border-outline-variant bg-surface p-4 text-sm text-on-surface-variant">
-                Sync activity will appear here after discovery, pairing, or a
-                manual refresh.
+                Sync activity will appear here once a real transport-backed lane
+                writes events into the local authority.
               </div>
             )}
           </div>
@@ -4379,6 +4545,8 @@ export function SettingsDetailScreen({
   onOpenPage = () => undefined,
   onOpenTab = () => undefined,
   orderedAccountIds = [],
+  demoModeEnabled = readDemoModeEnabled(),
+  onRequestEnableDemoMode = () => undefined,
 }: SettingsDetailScreenProps) {
   let page: ReactNode;
 
@@ -4387,7 +4555,13 @@ export function SettingsDetailScreen({
       page = <ManageAccountPage />;
       break;
     case "appearance":
-      page = <AppearancePage orderedAccountIds={orderedAccountIds} />;
+      page = (
+        <AppearancePage
+          demoModeEnabled={demoModeEnabled}
+          onRequestEnableDemoMode={onRequestEnableDemoMode}
+          orderedAccountIds={orderedAccountIds}
+        />
+      );
       break;
     case "security":
       page = <SecurityPage />;
@@ -4396,10 +4570,10 @@ export function SettingsDetailScreen({
       page = <DataStoragePage />;
       break;
     case "parsing":
-      page = <ParsingPage onOpenTab={onOpenTab} />;
+      page = <ParsingWorkspacePage onOpenTab={onOpenTab} />;
       break;
     case "forwarding":
-      page = <ForwardingPage />;
+      page = <SmsCaptureRoutingPage />;
       break;
     case "help":
       page = <HelpPage />;
@@ -4412,13 +4586,15 @@ export function SettingsDetailScreen({
       break;
     case "advanced":
     default:
-      page = <AdvancedPage />;
+      page = <AdvancedBoundaryPage />;
   }
 
   return (
     <>
       <SettingsMotionStyles />
-      {page}
+      <MotionPage className="space-y-0" key={pageId}>
+        {page}
+      </MotionPage>
     </>
   );
 }

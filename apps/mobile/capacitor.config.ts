@@ -2,10 +2,11 @@ import { CapacitorConfig } from "@capacitor/cli";
 
 const config: CapacitorConfig = {
   appId: "com.omnisync.mobile",
-  appName: "Omni-Sync SMS Finance",
+  appName: "Track Wallet",
   webDir: "dist",
-  bundledWebRuntime: false,
+  android: {
+    includePlugins: ["@omni-sync/mobile-sms-capture"],
+  },
 };
 
 export default config;
-

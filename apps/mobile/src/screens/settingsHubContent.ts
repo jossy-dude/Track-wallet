@@ -35,30 +35,30 @@ export interface SettingsCategorySection {
 const settingsCategories: Record<SettingsCategoryId, SettingsCategory> = {
   account: {
     id: "account",
-    title: "Account",
-    description: "Identity, membership, and workspace profile controls",
+    title: "Local profile",
+    description: "Name, privacy status, and export posture",
     icon: "person",
     accent: "primary",
-    detailEyebrow: "Account workspace",
+    detailEyebrow: "This phone",
     detailSummary:
-      "This destination is already wired. Send the account-page design next and it can replace this placeholder directly.",
+      "Name saves locally now, while privacy and export toggles stay clearly framed as device defaults until enforcement lands.",
     detailHighlights: [
       "Profile identity",
-      "Membership and billing",
-      "Workspace ownership",
+      "Privacy defaults",
+      "Export controls",
     ],
   },
   appearance: {
     id: "appearance",
     title: "Appearance",
-    description: "Theme, typography, and visual density preferences",
+    description: "Theme, density, and showcase",
     icon: "palette",
     accent: "secondary",
     detailEyebrow: "Visual system",
     detailSummary:
-      "This is the landing point for future appearance controls once you send that page design.",
+      "Save the live device-level appearance choices now, while theme and density previews stay clearly gated for alpha honesty.",
     detailHighlights: [
-      "Theme and color mode",
+      "Theme mode",
       "Typography scale",
       "Spacing and density",
     ],
@@ -66,27 +66,26 @@ const settingsCategories: Record<SettingsCategoryId, SettingsCategory> = {
   security: {
     id: "security",
     title: "Security & Privacy",
-    description: "Biometrics, PIN, and personal data protections",
+    description: "Lock, biometrics, and privacy",
     icon: "security",
     accent: "secondary",
     detailEyebrow: "Trust controls",
     detailSummary:
-      "The route exists now so the detailed security design can drop in without changing mobile navigation again.",
+      "Save a local unlock plan and review device posture without pretending OS enforcement or remote revocation is already live.",
     detailHighlights: [
       "Biometric unlock",
       "PIN and device lock",
-      "Local privacy controls",
+      "Privacy rules",
     ],
   },
   dataStorage: {
     id: "dataStorage",
     title: "Data & Storage",
-    description: "Import, export, backup, and local data controls",
+    description: "Import, export, backup, and clear",
     icon: "database",
     accent: "tertiary",
     detailEyebrow: "Local data",
-    detailSummary:
-      "Manage imports, exports, backups, and local authority over stored data and history.",
+    detailSummary: "Import, backup, restore, and local data cleanup.",
     detailHighlights: [
       "Import and export",
       "Backups and recovery",
@@ -96,57 +95,56 @@ const settingsCategories: Record<SettingsCategoryId, SettingsCategory> = {
   sync: {
     id: "sync",
     title: "Sync & Devices",
-    description: "Connected devices, nearby discovery, and pairing flows",
+    description: "Discovery, trusted devices, and pairing",
     icon: "sync",
     accent: "secondary",
     detailEyebrow: "Connected surfaces",
     detailSummary:
-      "This destination replaces the previous inline sync panel so the actual sync page can become its own focused screen.",
+      "Inspect local sync posture and preview device state from one route while transport-backed discovery and pairing stay hidden.",
     detailHighlights: [
-      "Nearby device discovery",
-      "Trusted device management",
-      "Manual and automatic sync",
+      "Nearby discovery",
+      "Trusted devices",
+      "Manual sync",
     ],
   },
   parsing: {
     id: "parsing",
     title: "Parsing Engine",
-    description: "Parser templates, extraction rules, and review tooling",
+    description: "Template workspace and parser diagnostics",
     icon: "code",
-    accent: "primary",
-    detailEyebrow: "Parser controls",
+    accent: "neutral",
+    detailEyebrow: "System internals",
     detailSummary:
-      "The old parser lab is removed from the hub. This placeholder marks where the dedicated parsing page will live.",
+      "Built-in templates, account bindings, preview, and parser diagnostics for internal review.",
     detailHighlights: [
       "Template families",
-      "Rule diagnostics",
-      "Review and debugging tools",
+      "Account bindings",
+      "Preview and diagnostics",
     ],
   },
   forwarding: {
     id: "forwarding",
-    title: "SMS Forwarding",
-    description: "Message capture, transport handoff, and forwarding status",
+    title: "SMS Capture & Routing",
+    description: "Capture runtime and routing diagnostics",
     icon: "sms",
-    accent: "primary",
-    detailEyebrow: "Capture pipeline",
+    accent: "neutral",
+    detailEyebrow: "System internals",
     detailSummary:
-      "This route is ready for the forwarding design and keeps the hub honest as a category launcher only.",
+      "Capture runtime, sender rules, queue, and diagnostics for internal setup work.",
     detailHighlights: [
-      "Forwarding state",
-      "Transport readiness",
-      "Capture diagnostics",
+      "Runtime state",
+      "Queue routing",
+      "Diagnostics",
     ],
   },
   advanced: {
     id: "advanced",
     title: "Advanced",
-    description: "Logs, developer tools, and experimental runtime controls",
+    description: "Logs and staged runtime tools",
     icon: "settings_suggest",
     accent: "neutral",
     detailEyebrow: "Developer tools",
-    detailSummary:
-      "Use this destination for the deeper runtime and diagnostics page when you hand it over.",
+    detailSummary: "Diagnostics, logs, and staged runtime controls.",
     detailHighlights: [
       "Runtime diagnostics",
       "Logs and traces",
@@ -158,7 +156,7 @@ const settingsCategories: Record<SettingsCategoryId, SettingsCategory> = {
 export const settingsHubSections: readonly SettingsCategorySection[] = [
   {
     id: "general",
-    title: "General",
+    title: "Preferences",
     categories: [
       settingsCategories.appearance,
       settingsCategories.security,
@@ -168,11 +166,10 @@ export const settingsHubSections: readonly SettingsCategorySection[] = [
   },
   {
     id: "system",
-    title: "System Integration",
+    title: "System internals",
     categories: [
       settingsCategories.parsing,
       settingsCategories.forwarding,
-      settingsCategories.advanced,
     ],
   },
 ];

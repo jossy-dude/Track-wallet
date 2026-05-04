@@ -6,6 +6,8 @@ It is intentionally narrow to the active v3 loop:
 
 `SMS -> Parse -> Edit -> Approve -> Dashboard`
 
+Desktop is intentionally out of the live alpha loop for this handoff. Any sync or pairing references below describe the current mobile UI/state model, not a shipped desktop transport lane.
+
 ## Current Frontend Surfaces
 
 ### 1. Home
@@ -124,11 +126,11 @@ Writes:
 - `triggerManualSync`
 
 Required backend contract:
-- real SMS listener input to replace manual parsing debug entry
-- real storage and sync health/status surfaces
-- trusted-device persistence and pairing lifecycle
-- sync actions that remain local-first and stateful across app restarts
-- authority-backed account/profile settings if the new account/settings pages are meant to persist beyond the device
+- the SMS listener/bridge path already exists; the remaining gap is making host/runtime coverage, permission-state handling, and backfill/history behavior consistently feed the same inbox/review pipeline instead of relying on manual-only fallback paths
+- real local storage health/status surfaces for the active mobile authority path
+- modeled trusted-device and pairing state that stays honest about not being a live cross-device protocol yet
+- sync actions that remain local-first UI state until a real transport lane exists
+- device-local settings/account persistence only for this alpha; any cross-device or profile-backed settings work is post-alpha
 
 ## Current Store Boundary
 
@@ -167,8 +169,8 @@ The UI expects every matched result to provide:
 
 ## Backend Work Still Needed
 
-1. Replace `localStorage` persistence with the intended local-first database layer.
+1. Continue converging preview/browser persistence with the more advanced mobile local authority path without claiming a finished SQLite-backed authority before it exists.
 2. Persist raw SMS messages separately from parsed drafts and unmatched review items.
 3. Add dedupe by `messageId`.
-4. Add sync status, listener status, and storage health selectors for the settings surface.
+4. Keep sync status, listener status, and storage health selectors honest about the difference between modeled UI state and a real transport/runtime path.
 5. Expand deterministic bank parsers toward parity with the Python source.

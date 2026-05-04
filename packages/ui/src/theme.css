@@ -1,5 +1,8 @@
-@import url("https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,200..900;1,7..72,200..900&family=Nunito+Sans:ital,opsz,wght@0,6..12,200..1000;1,6..12,200..1000&display=swap");
-@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap");
+@import "@fontsource-variable/nunito-sans/full.css";
+@import "@fontsource/literata/400.css";
+@import "@fontsource/literata/700.css";
+
+/* Text fonts stay local-only for alpha packaging; MaterialSymbol now renders from bundled local SVG assets. */
 
 html {
   font-family: "Nunito Sans", sans-serif;
