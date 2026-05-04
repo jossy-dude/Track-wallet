@@ -1,0 +1,218 @@
+name: Android Alpha Prerelease
+
+on:
+  push:
+    tags:
+      - "android-alpha-v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Prerelease tag to publish, for example android-alpha-v0.1.0-alpha.1"
+        required: true
+        type: string
+      release_name:
+        description: "Optional release title override"
+        required: false
+        default: ""
+        type: string
+      prerelease:
+        description: "Mark the GitHub release as a prerelease"
+        required: false
+        default: true
+        type: boolean
+      signed_release:
+        description: "Request signed release output and fail if signing secrets are missing"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: android-alpha-prerelease-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  publish-android-alpha:
+    name: Publish Android Alpha Prerelease
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+      RELEASE_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.release_name || '' }}
+      RELEASE_PRERELEASE: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
+      REQUEST_SIGNED_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.signed_release || 'false' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses and install build tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run forced workspace typecheck
+        run: npm run ci:typecheck
+
+      - name: Run release-gate test suites
+        run: npm run ci:test
+
+      - name: Build mobile web shell
+        run: npm run ci:build:mobile
+
+      - name: Prepare Android signing inputs
+        shell: bash
+        env:
+          TRACK_WALLET_RELEASE_KEYSTORE_BASE64: ${{ secrets.TRACK_WALLET_RELEASE_KEYSTORE_BASE64 }}
+          TRACK_WALLET_RELEASE_STORE_PASSWORD_SECRET: ${{ secrets.TRACK_WALLET_RELEASE_STORE_PASSWORD }}
+          TRACK_WALLET_RELEASE_KEY_ALIAS_SECRET: ${{ secrets.TRACK_WALLET_RELEASE_KEY_ALIAS }}
+          TRACK_WALLET_RELEASE_KEY_PASSWORD_SECRET: ${{ secrets.TRACK_WALLET_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${REQUEST_SIGNED_RELEASE}" != "true" ]]; then
+            {
+              echo "TRACK_WALLET_RELEASE_SIGNING_ENABLED=false"
+              echo "BUILD_VARIANT=unsigned"
+              echo "APK_PATH=apps/mobile/android/app/build/outputs/apk/release/app-release-unsigned.apk"
+              echo "APK_LABEL=track-wallet-android-internal-alpha-unsigned.apk"
+            } >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          missing=()
+          [[ -n "${TRACK_WALLET_RELEASE_KEYSTORE_BASE64}" ]] || missing+=("TRACK_WALLET_RELEASE_KEYSTORE_BASE64")
+          [[ -n "${TRACK_WALLET_RELEASE_STORE_PASSWORD_SECRET}" ]] || missing+=("TRACK_WALLET_RELEASE_STORE_PASSWORD")
+          [[ -n "${TRACK_WALLET_RELEASE_KEY_ALIAS_SECRET}" ]] || missing+=("TRACK_WALLET_RELEASE_KEY_ALIAS")
+          [[ -n "${TRACK_WALLET_RELEASE_KEY_PASSWORD_SECRET}" ]] || missing+=("TRACK_WALLET_RELEASE_KEY_PASSWORD")
+
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Signed Android alpha was requested, but these GitHub secrets are missing: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+          keystore_path="${RUNNER_TEMP}/track-wallet-alpha-release.jks"
+          printf '%s' "${TRACK_WALLET_RELEASE_KEYSTORE_BASE64}" | base64 --decode > "${keystore_path}"
+
+          {
+            echo "TRACK_WALLET_RELEASE_SIGNING_ENABLED=true"
+            echo "TRACK_WALLET_RELEASE_STORE_FILE=${keystore_path}"
+            echo "TRACK_WALLET_RELEASE_STORE_PASSWORD=${TRACK_WALLET_RELEASE_STORE_PASSWORD_SECRET}"
+            echo "TRACK_WALLET_RELEASE_KEY_ALIAS=${TRACK_WALLET_RELEASE_KEY_ALIAS_SECRET}"
+            echo "TRACK_WALLET_RELEASE_KEY_PASSWORD=${TRACK_WALLET_RELEASE_KEY_PASSWORD_SECRET}"
+            echo "BUILD_VARIANT=signed"
+            echo "APK_PATH=apps/mobile/android/app/build/outputs/apk/release/app-release.apk"
+            echo "APK_LABEL=track-wallet-android-internal-alpha-signed.apk"
+          } >> "$GITHUB_ENV"
+
+      - name: Build Android alpha release APK
+        run: npm run ci:build:android:release
+
+      - name: Verify Android alpha outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "${APK_PATH}"
+          test -f apps/mobile/android/app/build/outputs/apk/release/output-metadata.json
+
+      - name: Upload Android alpha workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: track-wallet-android-internal-alpha-${{ env.BUILD_VARIANT }}-apk
+          if-no-files-found: error
+          path: |
+            ${{ env.APK_PATH }}
+            apps/mobile/android/app/build/outputs/apk/release/output-metadata.json
+          retention-days: 14
+
+      - name: Prepare prerelease notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_name="${RELEASE_NAME}"
+          if [[ -z "${release_name}" ]]; then
+            release_name="Track Wallet Android Internal Alpha ${RELEASE_TAG}"
+          fi
+
+          prerelease_flag=""
+          if [[ "${RELEASE_PRERELEASE}" == "true" ]]; then
+            prerelease_flag="--prerelease"
+          fi
+
+          {
+            echo "RESOLVED_RELEASE_NAME=${release_name}"
+            echo "RELEASE_FLAG_PRERELEASE=${prerelease_flag}"
+          } >> "$GITHUB_ENV"
+
+          cat <<EOF > "${RUNNER_TEMP}/android-alpha-release-notes.md"
+          Android internal alpha generated by GitHub Actions.
+
+          Included gates:
+          - npm run ci:typecheck
+          - npm run ci:test
+          - npm run ci:build:mobile
+          - npm run ci:build:android:release
+
+          Artifact truth:
+          - Build variant: ${BUILD_VARIANT}
+          - APK path in CI: ${APK_PATH}
+          - Metadata path: apps/mobile/android/app/build/outputs/apk/release/output-metadata.json
+          - Signed output only exists when signing was explicitly requested and all signing secrets were supplied.
+
+          Honesty boundaries:
+          - This workflow does not prove device install, resume, permission, or Play Console readiness.
+          - See docs/release/ANDROID_INTERNAL_ALPHA_RUNBOOK.md for the current release-truth runbook.
+          EOF
+
+      - name: Publish GitHub prerelease
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "${RELEASE_TAG}" >/dev/null 2>&1 && exists=true || exists=false
+
+          if [[ "${exists}" == "true" ]]; then
+            gh release upload "${RELEASE_TAG}" \
+              "${APK_PATH}#${APK_LABEL}" \
+              "apps/mobile/android/app/build/outputs/apk/release/output-metadata.json#output-metadata.json" \
+              --clobber
+            gh release edit "${RELEASE_TAG}" \
+              --title "${RESOLVED_RELEASE_NAME}" \
+              ${RELEASE_FLAG_PRERELEASE} \
+              --notes-file "${RUNNER_TEMP}/android-alpha-release-notes.md"
+            exit 0
+          fi
+
+          gh release create "${RELEASE_TAG}" \
+            "${APK_PATH}#${APK_LABEL}" \
+            "apps/mobile/android/app/build/outputs/apk/release/output-metadata.json#output-metadata.json" \
+            --target "${GITHUB_SHA}" \
+            --title "${RESOLVED_RELEASE_NAME}" \
+            ${RELEASE_FLAG_PRERELEASE} \
+            --notes-file "${RUNNER_TEMP}/android-alpha-release-notes.md"

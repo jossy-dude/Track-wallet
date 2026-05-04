@@ -16,6 +16,9 @@
     "build": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fontsource-variable/nunito-sans": "^5.2.7",
+    "@fontsource/literata": "^5.2.8"
   }
 }
-

@@ -1,0 +1,128 @@
+name: CI Baseline
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run forced workspace typecheck
+        run: npm run ci:typecheck
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run release-gate test suites
+        run: npm run ci:test
+
+  mobile-web-build:
+    name: Mobile Web Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build mobile web shell
+        run: npm run ci:build:mobile
+
+  android-release-artifact:
+    name: Android Release Artifact
+    runs-on: ubuntu-latest
+    needs:
+      - typecheck
+      - unit-tests
+      - mobile-web-build
+    env:
+      TRACK_WALLET_RELEASE_SIGNING_ENABLED: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses and install build tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build unsigned Android alpha release APK
+        run: npm run ci:build:android:release
+
+      - name: Upload unsigned Android alpha release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: track-wallet-android-internal-alpha-unsigned-apk
+          if-no-files-found: error
+          path: |
+            apps/mobile/android/app/build/outputs/apk/release/app-release-unsigned.apk
+            apps/mobile/android/app/build/outputs/apk/release/output-metadata.json
+          retention-days: 14

@@ -8,10 +8,14 @@
   },
   "dependencies": {
     "@omni-sync/core": "0.1.0",
+    "drizzle-kit": "^0.31.10",
+    "drizzle-orm": "^0.45.2",
+    "sql.js": "^1.14.1",
     "zustand": "^4.5.5"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
+    "db:generate": "drizzle-kit generate --config drizzle.config.ts",
     "test": "vitest run --pool=threads --poolOptions.threads.singleThread",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }

@@ -5,14 +5,16 @@ export type FinanceAccentTone = "primary" | "tertiary" | "secondary";
 export type AccountSurfaceTone = FinanceAccentTone | "surface";
 
 export interface TopAppBarProfile {
-  avatarUrl: string;
+  avatarUrl?: string;
   avatarAlt: string;
+  avatarFallbackLabel: string;
 }
 
 export interface TopAppBarAction {
   icon: MaterialSymbolName;
   label: string;
   onPress?: () => void;
+  variant?: "icon" | "pill";
 }
 
 export interface BalanceBreakdownItem {
@@ -49,6 +51,10 @@ export interface InboxTransactionPreview {
   transactionIcon: MaterialSymbolName;
   tone: FinanceAccentTone;
   amountDisplay?: string;
+  sourceSenderLabel?: string;
+  sourceAccountLabel?: string;
+  sourceInstitutionLabel?: string;
+  sourceConfidenceLabel?: string;
 }
 
 export interface BottomNavigationItem {
@@ -56,6 +62,7 @@ export interface BottomNavigationItem {
   label: string;
   icon: MaterialSymbolName;
   isActive: boolean;
+  kind?: "tab" | "action";
   onPress?: () => void;
 }
 
